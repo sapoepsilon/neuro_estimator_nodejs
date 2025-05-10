@@ -13,40 +13,51 @@ function getEstimatorModel() {
 /**
  * Prepare the prompt for the estimator agent
  * @param {Object} requestData - The data from the request
+ * @param {Object} [requestData.projectDetails] - Details about the project
+ * @param {Object} [requestData.responseStructure] - Custom structure for the response
  * @returns {string} - The formatted prompt
  */
 function prepareEstimatorPrompt(requestData) {
+  // Extract project details and response structure from request
+  const { projectDetails, responseStructure } = requestData;
+
+  // Default response structure if not provided
+  const defaultResponseStructure = {
+    estimate: {
+      title: "Title of the estimate",
+      totalAmount: 0,
+      currency: "USD",
+      lineItems: [
+        {
+          description: "Description of item",
+          quantity: 0,
+          unitPrice: 0,
+          amount: 0,
+          subItems: [
+            {
+              description: "Description of sub-item",
+              quantity: 0,
+              unitPrice: 0,
+              amount: 0,
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  // Use the provided response structure or default if not provided
+  const structureToUse = responseStructure || defaultResponseStructure;
+
   return `
     You are an estimator agent. Based on the following request, create a detailed line item JSON estimate.
     Include nested line items where appropriate. Make sure the output is valid JSON.
     
     Request details:
-    ${JSON.stringify(requestData, null, 2)}
+    ${JSON.stringify(projectDetails || requestData, null, 2)}
     
     Respond with a JSON object that has the following structure:
-    {
-      "estimate": {
-        "title": "Title of the estimate",
-        "totalAmount": 0,
-        "currency": "USD",
-        "lineItems": [
-          {
-            "description": "Description of item",
-            "quantity": 0,
-            "unitPrice": 0,
-            "amount": 0,
-            "subItems": [
-              {
-                "description": "Description of sub-item",
-                "quantity": 0,
-                "unitPrice": 0,
-                "amount": 0
-              }
-            ]
-          }
-        ]
-      }
-    }
+    ${JSON.stringify(structureToUse, null, 2)}
   `;
 }
 

@@ -3,6 +3,8 @@ const { generateEstimate } = require('../services/geminiService');
 /**
  * Validate the request data for the estimator
  * @param {Object} requestData - The data to validate
+ * @param {Object} requestData.projectDetails - Details about the project to estimate
+ * @param {Object} [requestData.responseStructure] - Optional custom structure for the response
  * @returns {Object|null} - Error object if validation fails, null if successful
  */
 function validateEstimatorRequest(requestData) {
@@ -20,6 +22,16 @@ function validateEstimatorRequest(requestData) {
       status: 400,
       message: 'Project details are required'
     };
+  }
+  
+  // If responseStructure is provided, validate it's a valid object
+  if (requestData.responseStructure !== undefined) {
+    if (typeof requestData.responseStructure !== 'object' || requestData.responseStructure === null) {
+      return {
+        status: 400,
+        message: 'Response structure must be a valid JSON object'
+      };
+    }
   }
 
   return null;
