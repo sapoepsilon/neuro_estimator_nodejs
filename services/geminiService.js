@@ -1,6 +1,10 @@
-const jsonrepair = require("jsonrepair");
-const { getModel } = require("../aimodel/aiClient");
-const { GEMINI_MODELS, MODEL_CONFIGS } = require("../aimodel/geminiModels");
+import { getModel } from "../aimodel/aiClient.js";
+import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
+import {
+  createProject,
+  createEstimateItems,
+  processAndSaveEstimate,
+} from "./projectService.js";
 
 /**
  * Get the Gemini model instance for the estimator
@@ -106,14 +110,54 @@ async function generateEstimate(requestData) {
     const result = await model.generateContent(prompt);
     const responseText = result.response.text();
 
+    // Store the raw response text for debugging/logging
+    const rawResponse = {
+      text: responseText,
+      timestamp: new Date().toISOString(),
+      prompt: prompt,
+    };
+
     // Process and validate the response
-    return processGeminiResponse(responseText);
+    const estimateData = processGeminiResponse(responseText);
+
+    // Add the raw response to the estimate data for reference
+    const estimateWithRawData = {
+      ...estimateData,
+      _rawGeminiResponse: rawResponse,
+    };
+
+    // If user is authenticated (userId is present), save the project and estimate to the database
+    if (requestData.userId) {
+      try {
+        // Use the processAndSaveEstimate function to handle database operations
+        // This will now store both the processed data and raw response
+        const processedData = await processAndSaveEstimate(
+          estimateWithRawData,
+          requestData.userId,
+          requestData.projectDetails || {}
+        );
+
+        // Return the processed data with database IDs
+        // Remove the raw response from the client response to reduce payload size
+        delete processedData._rawGeminiResponse;
+        return processedData;
+      } catch (dbError) {
+        console.error(
+          "Error saving project and estimate to database:",
+          dbError
+        );
+        // Continue with the response even if database operations fail
+        // Just log the error and don't throw, so the user still gets their estimate
+      }
+    }
+
+    // Remove the raw response from the client response to reduce payload size
+    delete estimateWithRawData._rawGeminiResponse;
+    return estimateWithRawData;
   } catch (error) {
     console.error("Error generating estimate:", error);
     throw error;
   }
 }
 
-module.exports = {
-  generateEstimate,
-};
+export { generateEstimate };

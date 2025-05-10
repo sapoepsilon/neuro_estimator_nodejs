@@ -27,7 +27,7 @@ const MODEL_CONFIGS = {
   // Add more configurations as needed
 };
 
-module.exports = {
+export {
   GEMINI_MODELS,
   MODEL_CONFIGS,
 };

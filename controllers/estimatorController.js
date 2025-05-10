@@ -1,4 +1,4 @@
-const { generateEstimate } = require('../services/geminiService');
+import { generateEstimate } from '../services/geminiService.js';
 
 /**
  * Validate the request data for the estimator
@@ -52,8 +52,17 @@ async function handleEstimatorRequest(req, res) {
       return res.status(validationError.status).json({ error: validationError.message });
     }
     
+    // Get the authenticated user from the request (added by verifyAuth middleware)
+    const user = req.user;
+    
+    // Add the user ID to the request data for tracking who created the estimate
+    const requestWithUser = {
+      ...requestData,
+      userId: user.id
+    };
+    
     // Generate the estimate using Gemini
-    const estimate = await generateEstimate(requestData);
+    const estimate = await generateEstimate(requestWithUser);
     
     // Return the estimate as JSON
     return res.json(estimate);
@@ -66,6 +75,6 @@ async function handleEstimatorRequest(req, res) {
   }
 }
 
-module.exports = {
+export {
   handleEstimatorRequest
 };

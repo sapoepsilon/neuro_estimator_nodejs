@@ -1,10 +1,12 @@
-const express = require("express");
+import express from "express";
 const router = express.Router();
-const {
+import {
   handleEstimatorRequest,
-} = require("../controllers/estimatorController");
+} from "../controllers/estimatorController.js";
+import { verifyAuth } from "../middleware/authMiddleware.js";
 
 // POST /api/agent - Generate an estimate using Gemini
-router.post("/agent", handleEstimatorRequest);
+// Requires authentication
+router.post("/agent", verifyAuth, handleEstimatorRequest);
 
-module.exports = router;
+export default router;

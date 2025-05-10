@@ -14,6 +14,11 @@ npm install
 
    - Create a `.env` file in the root directory
    - Add your Google API key: `GOOGLE_API_KEY=your_api_key_here`
+   - Add your Supabase URL and anon key:
+     ```
+     SUPABASE_URL=your_supabase_url
+     SUPABASE_ANON_KEY=your_supabase_anon_key
+     ```
 
 3. Start the server:
 
@@ -35,7 +40,27 @@ npm run dev
 
 ### Estimator API
 
-- `POST /api/agent`: Generate a detailed estimate using Gemini Flash 002
+- `POST /api/agent`: Generate a detailed estimate using Gemini Flash 002 (requires authentication)
+
+#### Authentication
+
+The `/api/agent` endpoint requires authentication using a Supabase JWT token. Include the token in the `Authorization` header of your request:
+
+```
+Authorization: Bearer your_supabase_jwt_token
+```
+
+You can obtain this token from your frontend application after a user signs in with Supabase Auth.
+
+##### Development Mode
+
+For development and testing purposes, the authentication can be bypassed in the following ways:
+
+1. The application automatically detects development mode when `NODE_ENV` is not set or set to `development`
+2. In development mode, you can make requests without an authentication token
+3. Alternatively, you can include a header `x-dev-mode: true` in your requests
+
+This makes it easier to test the API during development without setting up Supabase credentials.
 
 #### Request Format for Estimator
 
@@ -178,9 +203,12 @@ The response will follow your custom structure:
 ## Project Structure
 
 ```
-├── controllers/          # Request handlers
+├── aimodel/             # AI model configurations and clients
+├── controllers/         # Request handlers
+├── middleware/          # Express middleware (including auth)
 ├── routes/              # API route definitions
 ├── services/            # Business logic and external services
+├── supabase/            # Supabase migrations and configurations
 ├── .env                 # Environment variables (create this file)
 ├── index.js             # Application entry point
 ├── package.json         # Project dependencies
