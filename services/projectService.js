@@ -654,6 +654,85 @@ function normalizeLineItems(lineItems, currency = "USD") {
   });
 }
 
+/**
+ * Get a project by ID
+ * @param {number|string} projectId - The ID of the project to retrieve
+ * @returns {Promise<Object|null>} - The project object or null if not found
+ */
+async function getProjectById(projectId) {
+  try {
+    const { data: project, error } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("id", projectId)
+      .single();
+
+    if (error) {
+      console.error("Error fetching project:", error);
+      return null;
+    }
+
+    return project;
+  } catch (error) {
+    console.error("Error in getProjectById:", error);
+    return null;
+  }
+}
+
+/**
+ * Get conversations by project ID
+ * @param {number|string} projectId - The ID of the project
+ * @returns {Promise<Array>} - Array of conversations
+ */
+async function getConversationsByProjectId(projectId) {
+  try {
+    // Get conversations for this project
+    const { data: conversations, error: convError } = await supabase
+      .from("conversations")
+      .select("id, created_at, created_by")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false });
+
+    if (convError) {
+      console.error("Error fetching conversations:", convError);
+      return [];
+    }
+
+    // For each conversation, get the messages
+    const conversationsWithMessages = await Promise.all(
+      conversations.map(async (conversation) => {
+        const { data: messages, error: msgError } = await supabase
+          .from("messages")
+          .select("*")
+          .eq("conversation_id", conversation.id)
+          .order("created_at", { ascending: true });
+
+        if (msgError) {
+          console.error("Error fetching messages:", msgError);
+          return { ...conversation, messages: [] };
+        }
+
+        // Parse JSON content in messages
+        const parsedMessages = messages.map((message) => {
+          try {
+            const content = JSON.parse(message.content);
+            return { ...message, parsedContent: content };
+          } catch (e) {
+            return message;
+          }
+        });
+
+        return { ...conversation, messages: parsedMessages };
+      })
+    );
+
+    return conversationsWithMessages;
+  } catch (error) {
+    console.error("Error in getConversationsByProjectId:", error);
+    return [];
+  }
+}
+
 export {
   createProject,
   createEstimateItems,
@@ -661,4 +740,6 @@ export {
   processAndSaveEstimate,
   calculateTotalFromLineItems,
   normalizeLineItems,
+  getProjectById,
+  getConversationsByProjectId,
 };
