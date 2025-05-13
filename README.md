@@ -95,8 +95,8 @@ This makes it easier to test the API during development without setting up Supab
       {
         "description": "Feature Development",
         "quantity": 1,
-        "unitPrice": 3000,
-        "amount": 3000,
+        "unitPrice": 8080,
+        "amount": 8080,
         "subItems": [
           {
             "description": "Frontend Development",
@@ -217,4 +217,4 @@ The response will follow your custom structure:
 
 ## Port
 
-The application runs on port 3000 by default. You can change this by setting the PORT environment variable.
+The application runs on port 8080 by default. You can change this by setting the PORT environment variable.

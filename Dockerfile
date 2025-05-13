@@ -13,7 +13,7 @@ COPY . .
 
 # Set non-sensitive environment variables with defaults
 # Sensitive environment variables should be provided at runtime via --env-file
-ENV PORT=3000 \
+ENV PORT=8080 \
     NODE_ENV=production
 
 # For local development with Supabase running in Docker
@@ -21,7 +21,7 @@ ENV PORT=3000 \
 ENV DOCKER_SUPABASE_URL=http://host.docker.internal:54321
 
 # Expose the application port
-EXPOSE 3000
+EXPOSE 8080
 
 # Copy the entrypoint script and make it executable
 COPY docker-entrypoint.sh /app/

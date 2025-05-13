@@ -37,12 +37,14 @@ neuro_estimator_nodejs/
 ### API Layer
 
 **index.js**
+
 - Entry point for the application
 - Sets up Express server and middleware
 - Configures error handling
 - Mounts route handlers
 
 **routes/estimatorRoutes.js**
+
 - Defines API endpoints
 - Maps HTTP methods to controller functions
 - Current endpoints:
@@ -51,6 +53,7 @@ neuro_estimator_nodejs/
 ### Controller Layer
 
 **controllers/estimatorController.js**
+
 - Validates incoming requests
 - Orchestrates the estimate generation process
 - Handles error responses
@@ -61,6 +64,7 @@ neuro_estimator_nodejs/
 ### Service Layer
 
 **services/geminiService.js**
+
 - Implements the core functionality for generating estimates
 - Interacts with the Gemini AI model
 - Processes and validates AI responses
@@ -73,12 +77,14 @@ neuro_estimator_nodejs/
 ### AI Model Layer
 
 **aimodel/aiClient.js**
+
 - Initializes the Google Generative AI client
 - Provides a generic model access function
 - Key functions:
   - `getModel()` - Returns a configured model instance
 
 **aimodel/geminiModels.js**
+
 - Defines available Gemini models as an enum
 - Configures model parameters for different use cases
 - Current models:
@@ -101,7 +107,8 @@ neuro_estimator_nodejs/
 ## Configuration
 
 The application uses environment variables for configuration:
-- `PORT` - The port the server listens on (default: 3000)
+
+- `PORT` - The port the server listens on (default: 8080)
 - `GOOGLE_API_KEY` - API key for Google's Generative AI services
 
 ## Extension Points
@@ -109,10 +116,12 @@ The application uses environment variables for configuration:
 The architecture is designed to be extensible:
 
 1. **New AI Models**
+
    - Add new model definitions to `geminiModels.js`
    - Create new service functions for different AI tasks
 
 2. **Additional Endpoints**
+
    - Add new route handlers in `estimatorRoutes.js`
    - Create corresponding controller functions
 

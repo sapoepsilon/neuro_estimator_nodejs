@@ -38,7 +38,7 @@ async function generateEstimate(projectDetails) {
     };
 
     // Make the API request with the authentication token
-    const response = await fetch("http://localhost:3000/api/agent", {
+    const response = await fetch("http://localhost:8080/api/agent", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
