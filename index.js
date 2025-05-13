@@ -11,9 +11,10 @@ const PORT = process.env.PORT || 8080;
 // Configure CORS to allow requests from the frontend domain
 app.use(
   cors({
-    origin: ["https://app.estmtagent.com", "http://localhost:8080"],
+    origin: ["https://app.estmtagent.com", "http://localhost:8080", "https://neuro-estimator-700284360381.us-west1.run.app"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
   })
 );
 app.use(express.json());
