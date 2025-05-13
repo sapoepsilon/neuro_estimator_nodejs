@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.env
+.git
+.gitignore
+README.md
+ARCHITECTURE.md
+.vscode
+*.log
+.DS_Store
+examples/
+
+# Make sure not to ignore the entrypoint script
+!docker-entrypoint.sh

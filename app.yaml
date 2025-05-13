@@ -1,0 +1,12 @@
+runtime: nodejs20
+
+env_variables:
+  NODE_ENV: "production"
+  
+handlers:
+- url: /.*
+  script: auto
+
+automatic_scaling:
+  min_instances: 1
+  max_instances: 5
