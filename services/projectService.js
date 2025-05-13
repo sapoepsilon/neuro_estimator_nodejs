@@ -431,18 +431,9 @@ async function processAndSaveEstimate(
       currency = "USD"; // Default if it's a field definition
     }
 
-    console.log("Creating project with data:", {
-      name: projectTitle,
-      description: projectDescription,
-      totalAmount,
-      currency,
-    });
-
-    // Extract the raw Gemini response for storage
     const rawGeminiResponse = estimateData._rawGeminiResponse || null;
     delete estimateData._rawGeminiResponse; // Remove it from the main data structure
 
-    // Create a new project in the database with the total estimate and raw response
     const project = await createProject(
       {
         name: projectTitle,
@@ -463,16 +454,11 @@ async function processAndSaveEstimate(
       };
     }
 
-    // Extract and normalize line items from the estimate
     const rawLineItems = estimate.lineItems || [];
     const normalizedLineItems = normalizeLineItems(rawLineItems, currency);
 
-    // Create estimate items in the database
     let createdItems = [];
     if (normalizedLineItems.length > 0) {
-      console.log(
-        `Creating ${normalizedLineItems.length} estimate items for project ${project.id}`
-      );
       try {
         createdItems = await createEstimateItems(
           project.id,
@@ -481,13 +467,8 @@ async function processAndSaveEstimate(
         );
       } catch (itemError) {
         console.error("Error creating estimate items:", itemError);
-        // Continue with the response even if item creation fails
       }
-    } else {
-      console.log("No line items to create for project", project.id);
     }
-
-    // Add database IDs to the response
     return {
       ...estimateData,
       projectId: project.id,
@@ -496,7 +477,6 @@ async function processAndSaveEstimate(
     };
   } catch (error) {
     console.error("Error processing and saving estimate:", error);
-    // Return the original data even if saving fails
     return {
       ...estimateData,
       error: error.message || "Unknown error occurred",
@@ -516,11 +496,9 @@ function calculateTotalFromLineItems(lineItems) {
   return lineItems.reduce((total, item) => {
     let itemAmount = 0;
 
-    // Handle amount which could be a number or a field definition
     if (typeof item.amount === "number") {
       itemAmount = item.amount;
     } else if (item.amount && typeof item.amount.type === "string") {
-      // If amount is a field definition, calculate from quantity and unitPrice
       const quantity = typeof item.quantity === "number" ? item.quantity : 0;
       const unitPrice = typeof item.unitPrice === "number" ? item.unitPrice : 0;
       itemAmount = quantity * unitPrice;

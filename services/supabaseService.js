@@ -14,12 +14,8 @@ let supabase;
 function initSupabase() {
   try {
     supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
-    console.log("Supabase client initialized successfully");
   } catch (error) {
     console.error("Supabase client initialization failed: ", error);
-    console.error(
-      "To use a real Supabase client, set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your .env file."
-    );
   }
 }
 

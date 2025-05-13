@@ -11,6 +11,7 @@ const verifyAuth = async (req, res, next) => {
     // Get the authorization header
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      console.error("No authorization header found");
       return res.status(401).json({
         error: "Unauthorized",
         message: "Authentication token is required",
@@ -63,6 +64,4 @@ const verifyAuth = async (req, res, next) => {
   }
 };
 
-export {
-  verifyAuth,
-};
+export { verifyAuth };

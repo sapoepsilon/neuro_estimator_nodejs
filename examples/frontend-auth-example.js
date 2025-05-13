@@ -88,14 +88,7 @@ async function exampleUsage() {
       timeline: "3 months",
     };
 
-    const estimate = await generateEstimate(projectDetails);
-    console.log("Generated estimate:", estimate);
-
-    // You can now use the estimate data in your application
-    // If the estimate was saved to the database, it will include a projectId
-    if (estimate.projectId) {
-      console.log(`Estimate saved to project ID: ${estimate.projectId}`);
-    }
+    await generateEstimate(projectDetails);
   } catch (error) {
     console.error("Example usage error:", error.message);
   }

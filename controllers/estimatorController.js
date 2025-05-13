@@ -1,5 +1,6 @@
 import { generateEstimate, generateAdditionalEstimate } from '../services/geminiService.js';
-import { getProjectById, getConversationsByProjectId } from '../services/projectService.js';
+import { getProjectById, getConversationsByProjectId, createEstimateItems } from '../services/projectService.js';
+import { supabase } from '../services/supabaseService.js';
 
 /**
  * Validate the request data for the estimator
@@ -163,10 +164,126 @@ async function handleAdditionalPrompt(req, res) {
       };
       
       // Generate the additional estimate using Gemini
-      const estimate = await generateAdditionalEstimate(requestWithContext);
+      const estimateData = await generateAdditionalEstimate(requestWithContext);
       
-      // Return the estimate as JSON
-      return res.json(estimate);
+      // Extract line items from the estimate
+      const lineItems = estimateData.estimate?.lineItems || [];
+      
+      // If we have line items, save them to the database
+      if (lineItems && lineItems.length > 0) {
+        try {
+          // Get existing estimate items for this project
+          const { data: existingItems, error: itemsError } = await supabase
+            .from("estimate_items")
+            .select("title, description, amount, unit_price, unit_type, quantity, data")
+            .eq("project_id", project.id);
+
+          if (itemsError) {
+            console.error("Error fetching existing items:", itemsError);
+            throw itemsError;
+          }
+
+          // Filter out items that appear to be duplicates
+          const uniqueLineItems = lineItems.filter(item => {
+            // Check if this item already exists in the database
+            const isDuplicate = existingItems.some(existingItem => {
+              // Compare title/description (normalized to lowercase)
+              const titleMatch = (
+                (existingItem.title?.toLowerCase() === (item.description || item.title)?.toLowerCase()) ||
+                (existingItem.description?.toLowerCase() === (item.description || item.title)?.toLowerCase())
+              );
+              
+              // Compare amount, unit price, and quantity for additional verification
+              const amountMatch = Math.abs(parseFloat(existingItem.amount || 0) - parseFloat(item.amount || 0)) < 0.01;
+              const unitPriceMatch = Math.abs(parseFloat(existingItem.unit_price || 0) - parseFloat(item.unitPrice || 0)) < 0.01;
+              const quantityMatch = Math.abs(parseFloat(existingItem.quantity || 0) - parseFloat(item.quantity || 0)) < 0.01;
+              
+              // Consider it a duplicate if title matches and at least one other property matches
+              return titleMatch && (amountMatch || unitPriceMatch || quantityMatch);
+            });
+            
+            return !isDuplicate;
+          });
+          
+          // Only create items that don't already exist
+          const createdItems = uniqueLineItems.length > 0 ? 
+            await createEstimateItems(
+              project.id,
+              uniqueLineItems,
+              user.id
+            ) : [];
+          
+          // Calculate the total from all line items
+          const totalAmount = lineItems.reduce(
+            (sum, item) => sum + parseFloat(item.amount || 0),
+            0
+          );
+          
+          // Store the prompt and response in the conversation
+          let conversationId;
+          
+          if (conversations && conversations.length > 0) {
+            // Use the most recent conversation
+            conversationId = conversations[0].id;
+          } else {
+            // Create a new conversation
+            const { data: conversation, error: convError } = await supabase
+              .from("conversations")
+              .insert({
+                business_id: project.business_id,
+                project_id: project.id,
+                created_by: user.id,
+              })
+              .select()
+              .single();
+
+            if (convError) {
+              console.error("Error creating conversation:", convError);
+              throw convError;
+            }
+            
+            conversationId = conversation.id;
+          }
+          
+          // Store the Gemini response as a message
+          const { error: msgError } = await supabase.from("messages").insert({
+            conversation_id: conversationId,
+            content: JSON.stringify({
+              type: "additional_estimate",
+              prompt: requestData.prompt,
+              items_added: createdItems.length,
+              total_amount: totalAmount,
+            }),
+            role: "assistant",
+            user_id: user.id,
+          });
+
+          if (msgError) {
+            console.error("Error creating message:", msgError);
+            throw msgError;
+          }
+          
+          // Return success response with the number of items added
+          return res.json({
+            success: true,
+            message: lineItems.length === uniqueLineItems.length
+              ? `Added ${createdItems.length} new estimate items to the project`
+              : `Added ${createdItems.length} new unique estimate items to the project (${lineItems.length - uniqueLineItems.length} duplicates were skipped)`,
+            itemsAdded: createdItems.length,
+            duplicatesSkipped: lineItems.length - uniqueLineItems.length
+          });
+        } catch (dbError) {
+          console.error("Error saving additional estimate to database:", dbError);
+          return res.status(500).json({
+            error: "Failed to save estimate items to database",
+            details: dbError.message
+          });
+        }
+      } else {
+        return res.status(400).json({
+          error: "No estimate items were generated from the prompt"
+        });
+      }
     } else {
       return res.status(403).json({ error: 'You do not have access to this project' });
     }
