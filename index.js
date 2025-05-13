@@ -23,6 +23,11 @@ app.get("/", (req, res) => {
   res.send("Welcome to Neuro Estimator API");
 });
 
+// Health check endpoint for Cloud Run
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 app.use("/api", estimatorRoutes);
 
 app.use((err, req, res, next) => {
@@ -40,6 +45,7 @@ app.use((req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV}`);
 });
