@@ -205,6 +205,7 @@ async function createEstimateItems(projectId, estimateItems, userId) {
       quantity: parseFloat(item.quantity || 0),
       unit_price: parseFloat(item.unitPrice || 0),
       unit_type: item.unitType || "unit",
+      cost_type: item.costType || "material",
       amount: parseFloat(item.amount || 0),
       currency: item.currency || "USD",
       total_amount: parseFloat(item.totalAmount || item.amount || 0),
@@ -334,6 +335,7 @@ async function processSubItems(
         quantity: parseFloat(subItem.quantity || 0),
         unit_price: parseFloat(subItem.unitPrice || 0),
         unit_type: subItem.unitType || "unit",
+        cost_type: subItem.costType || "material",
         amount: parseFloat(subItem.amount || 0),
         currency: subItem.currency || "USD",
         total_amount: parseFloat(subItem.totalAmount || subItem.amount || 0),
@@ -550,6 +552,14 @@ function normalizeLineItems(lineItems, currency = "USD") {
       unitType = item.unitType.enum[0] || "unit";
     }
 
+    // Extract costType (could be string or field definition)
+    let costType = "material";
+    if (typeof item.costType === "string") {
+      costType = item.costType;
+    } else if (item.costType && Array.isArray(item.costType.enum)) {
+      costType = item.costType.enum[0] || "material";
+    }
+
     // Extract amount (could be number or field definition)
     let amount = 0;
     if (typeof item.amount === "number") {
@@ -601,6 +611,14 @@ function normalizeLineItems(lineItems, currency = "USD") {
           subUnitType = subItem.unitType.enum[0] || "unit";
         }
 
+        // Extract costType for sub-item
+        let subCostType = "material";
+        if (typeof subItem.costType === "string") {
+          subCostType = subItem.costType;
+        } else if (subItem.costType && Array.isArray(subItem.costType.enum)) {
+          subCostType = subItem.costType.enum[0] || "material";
+        }
+
         let subAmount = 0;
         if (typeof subItem.amount === "number") {
           subAmount = subItem.amount;
@@ -614,6 +632,7 @@ function normalizeLineItems(lineItems, currency = "USD") {
           quantity: subQuantity,
           unitPrice: subUnitPrice,
           unitType: subUnitType,
+          costType: subCostType,
           amount: subAmount,
           currency,
         };
@@ -625,6 +644,7 @@ function normalizeLineItems(lineItems, currency = "USD") {
       quantity: quantity,
       unitPrice: unitPrice,
       unitType: unitType,
+      costType: costType,
       amount: amount,
       currency: currency,
       subItems: subItems,

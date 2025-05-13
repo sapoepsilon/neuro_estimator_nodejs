@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS public.estimate_items (
   quantity NUMERIC(10, 2),
   unit_price NUMERIC(10, 2),
   unit_type TEXT CHECK (unit_type IN ('unit', 'sq-ft', 'board-ft', 'hour', 'day', 'package', 'linear-ft')),
+  cost_type TEXT CHECK (cost_type IN ('admin', 'subcontractor', 'material', 'labor', 'equipment', 'overhead', 'other')),
   amount NUMERIC(10, 2),
   currency TEXT DEFAULT 'USD',
   total_amount NUMERIC(10, 2),
@@ -94,13 +95,6 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
-
-ALTER TABLE public.businesses ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.business_users ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.estimate_items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX IF NOT EXISTS idx_business_users_user_id ON public.business_users(user_id);
 CREATE INDEX IF NOT EXISTS idx_business_users_business_id ON public.business_users(business_id);

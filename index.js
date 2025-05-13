@@ -15,6 +15,8 @@ app.use(
       "https://app.estmtagent.com",
       "http://localhost:8080",
       "https://neuro-estimator-700284360381.us-west1.run.app",
+      "https://localhost:5173",
+      "http://localhost:5173",
     ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "content-type"],
