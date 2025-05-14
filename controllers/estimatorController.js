@@ -175,7 +175,7 @@ async function handleAdditionalPrompt(req, res) {
           // Get existing estimate items for this project
           const { data: existingItems, error: itemsError } = await supabase
             .from("estimate_items")
-            .select("title, description, amount, unit_price, unit_type, quantity, data")
+            .select("title, description, amount, unit_price, unit_type, cost_type, quantity, data")
             .eq("project_id", project.id);
 
           if (itemsError) {
@@ -193,13 +193,14 @@ async function handleAdditionalPrompt(req, res) {
                 (existingItem.description?.toLowerCase() === (item.description || item.title)?.toLowerCase())
               );
               
-              // Compare amount, unit price, and quantity for additional verification
+              // Compare amount, unit price, quantity, and cost_type for additional verification
               const amountMatch = Math.abs(parseFloat(existingItem.amount || 0) - parseFloat(item.amount || 0)) < 0.01;
               const unitPriceMatch = Math.abs(parseFloat(existingItem.unit_price || 0) - parseFloat(item.unitPrice || 0)) < 0.01;
               const quantityMatch = Math.abs(parseFloat(existingItem.quantity || 0) - parseFloat(item.quantity || 0)) < 0.01;
+              const costTypeMatch = existingItem.cost_type === item.costType;
               
               // Consider it a duplicate if title matches and at least one other property matches
-              return titleMatch && (amountMatch || unitPriceMatch || quantityMatch);
+              return titleMatch && (amountMatch || unitPriceMatch || quantityMatch || costTypeMatch);
             });
             
             return !isDuplicate;
