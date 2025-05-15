@@ -1,14 +1,96 @@
 import { supabase } from "./supabaseService.js";
 
 /**
+ * Parse attributes from an instruction string
+ * @param {string} instructionPart - The instruction string (e.g., "description='Site Prep', quantity=1")
+ * @returns {Object} - Object with parsed attributes
+ */
+function parseInstructionAttributes(instructionPart) {
+  const attributes = {};
+  let currentKey = "";
+  let currentValue = "";
+  let inQuote = false;
+  let quoteChar = "";
+  let parsingKey = true;
+
+  // Handle special case for ID at the beginning
+  if (instructionPart.startsWith("ID:")) {
+    const idMatch = instructionPart.match(/^ID:(\d+),?\s*/);
+    if (idMatch) {
+      attributes.id = parseInt(idMatch[1], 10);
+      instructionPart = instructionPart.substring(idMatch[0].length);
+    }
+  }
+
+  // Parse the rest of the attributes
+  for (let i = 0; i < instructionPart.length; i++) {
+    const char = instructionPart[i];
+
+    if (parsingKey) {
+      if (char === "=") {
+        parsingKey = false;
+        currentKey = currentKey.trim();
+      } else {
+        currentKey += char;
+      }
+    } else {
+      // Parsing value
+      if (!inQuote && (char === "'" || char === '"')) {
+        inQuote = true;
+        quoteChar = char;
+      } else if (inQuote && char === quoteChar) {
+        inQuote = false;
+      } else if (!inQuote && char === ",") {
+        // End of value
+        attributes[currentKey] = processValue(currentValue.trim());
+        currentKey = "";
+        currentValue = "";
+        parsingKey = true;
+      } else {
+        currentValue += char;
+      }
+    }
+  }
+
+  // Add the last key-value pair if exists
+  if (currentKey) {
+    attributes[currentKey] = processValue(currentValue.trim());
+  }
+
+  return attributes;
+}
+
+/**
+ * Process a value to convert it to the appropriate type
+ * @param {string} value - The value to process
+ * @returns {any} - The processed value
+ */
+function processValue(value) {
+  // Remove quotes if present
+  if (
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith('"') && value.endsWith('"'))
+  ) {
+    return value.substring(1, value.length - 1);
+  }
+
+  // Convert to number if it's a number
+  if (!isNaN(value) && value.trim() !== "") {
+    return Number(value);
+  }
+
+  return value;
+}
+
+/**
  * Create a new project in the database
  * @param {Object} projectData - Project data
- * @param {string} projectData.name - Project name
+ * @param {string} projectData.name - Project name (can come from projectTitle extracted from Gemini's XML)
  * @param {string} projectData.description - Project description
  * @param {string} userId - The ID of the authenticated user
  * @param {number} [totalEstimate] - Total estimate value (optional)
  * @param {string} [currency] - Currency of the estimate (optional)
- * @param {Object} [rawResponse] - The raw response from Gemini (optional)
+ * @param {Object} [rawResponse] - The raw response from Gemini (containing prompt and processed XML)
  * @returns {Promise<Object>} - The created project
  */
 async function createProject(
@@ -69,8 +151,7 @@ async function createProject(
         if (convError) {
           console.error("Error creating conversation:", convError);
         } else if (conversation && conversation.id) {
-          // Store the Gemini response as a message
-          // Only use the columns that are definitely in the schema
+          // Store the Gemini response as a message with XML format
           const { error: msgError } = await supabase.from("messages").insert({
             conversation_id: conversation.id,
             content: JSON.stringify({
@@ -78,7 +159,7 @@ async function createProject(
               title: `Estimate for ${projectData.name}`,
               total_amount: totalEstimate,
               currency: currency,
-              raw_response: rawResponse,
+              raw_response: rawResponse, // This now contains the prompt and processed XML
             }),
             role: "assistant",
             user_id: userId,
@@ -189,10 +270,378 @@ async function updateProjectWithEstimate(
 }
 
 /**
+ * Get project line items with pagination
+ * @param {number|string} projectId - The ID of the project
+ * @param {number} offset - Offset for pagination (default: 0)
+ * @param {number} limit - Limit for pagination (default: 300)
+ * @returns {Promise<Array>} - Array of line items
+ */
+async function getProjectLineItems(projectId, offset = 0, limit = 300) {
+  try {
+    const { data: items, error } = await supabase
+      .from("estimate_items")
+      .select("*")
+      .eq("project_id", projectId)
+      .range(offset, offset + limit - 1)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Error fetching project line items:", error);
+      throw error;
+    }
+
+    return items || [];
+  } catch (error) {
+    console.error(
+      `Error in getProjectLineItems for project ${projectId}:`,
+      error
+    );
+    throw error;
+  }
+}
+
+/**
+ * Apply line item changes based on instructions from Gemini
+ * @param {number|string} projectId - The ID of the project
+ * @param {string} userId - The ID of the authenticated user
+ * @param {Array<string>} instructions - Array of instruction strings (e.g., ["+ description='Item A', quantity=10", "- ID:123"])
+ * @param {string} currency - Currency to use for the items (default: USD)
+ * @returns {Promise<Object>} - Summary of actions performed
+ */
+async function applyLineItemChanges(
+  projectId,
+  userId,
+  instructions,
+  currency = "USD"
+) {
+  try {
+    console.log("applyLineItemChanges called with:", {
+      projectId,
+      userId,
+      instructionsCount: instructions.length,
+      currency,
+    });
+
+    // Initialize counters for summary
+    const summary = {
+      itemsAdded: 0,
+      itemsUpdated: 0,
+      itemsDeleted: 0,
+      errors: [],
+    };
+
+    // Process each instruction
+    for (const instruction of instructions) {
+      const trimmedInstruction = instruction.trim();
+
+      // Skip empty instructions
+      if (!trimmedInstruction) continue;
+
+      // Determine the action type (add, update, delete)
+      if (trimmedInstruction.startsWith("+ ID:")) {
+        // Update existing item
+        const idMatch = trimmedInstruction.match(/^\+ ID:(\d+)/);
+        if (!idMatch) {
+          summary.errors.push(
+            `Invalid update instruction: ${trimmedInstruction}`
+          );
+          continue;
+        }
+
+        const itemId = parseInt(idMatch[1], 10);
+        const attributesStr = trimmedInstruction
+          .substring(trimmedInstruction.indexOf(",") + 1)
+          .trim();
+        const attributes = parseInstructionAttributes(attributesStr);
+
+        // Calculate amount if quantity and unit_price are provided but amount is not
+        if (
+          attributes.quantity &&
+          attributes.unit_price &&
+          !attributes.amount
+        ) {
+          attributes.amount = attributes.quantity * attributes.unit_price;
+        }
+
+        // Keep keys in snake_case to match database column names
+        const updateData = {};
+        for (const [key, value] of Object.entries(attributes)) {
+          // All keys should remain in snake_case to match database columns
+          if (key === "unit_price") updateData.unit_price = value;
+          else if (key === "parent_id") updateData.parent_item_id = value;
+          // Correct column name is parent_item_id
+          else if (key === "title") updateData.title = value;
+          else if (key === "unit_type") updateData.unit_type = value;
+          else if (key === "cost_type") updateData.cost_type = value;
+          else if (key === "is_sub_item") updateData.is_sub_item = value;
+          else if (key === "data") updateData.data = value;
+          else updateData[key] = value;
+        }
+
+        // If description is updated, update title too if title is not explicitly provided
+        if (updateData.description && !updateData.title) {
+          updateData.title = updateData.description;
+        }
+
+        console.log("Update data for item ID:", itemId, updateData);
+
+        // Update the item in the database
+        const { error } = await supabase
+          .from("estimate_items")
+          .update(updateData)
+          .eq("id", itemId)
+          .eq("project_id", projectId);
+
+        if (error) {
+          console.error("Error updating item ID:", itemId, error);
+          summary.errors.push(
+            `Error updating item ID:${itemId}: ${error.message}`
+          );
+        } else {
+          console.log("Successfully updated item ID:", itemId);
+          summary.itemsUpdated++;
+        }
+      } else if (trimmedInstruction.startsWith("- ID:")) {
+        // Delete item
+        const idMatch = trimmedInstruction.match(/^- ID:(\d+)/);
+        if (!idMatch) {
+          summary.errors.push(
+            `Invalid delete instruction: ${trimmedInstruction}`
+          );
+          continue;
+        }
+
+        const itemId = parseInt(idMatch[1], 10);
+
+        console.log("Deleting item ID:", itemId);
+
+        // Delete the item from the database
+        const { error } = await supabase
+          .from("estimate_items")
+          .delete()
+          .eq("id", itemId)
+          .eq("project_id", projectId);
+
+        if (error) {
+          console.error("Error deleting item ID:", itemId, error);
+          summary.errors.push(
+            `Error deleting item ID:${itemId}: ${error.message}`
+          );
+        } else {
+          console.log("Successfully deleted item ID:", itemId);
+          summary.itemsDeleted++;
+        }
+      } else if (trimmedInstruction.startsWith("+")) {
+        // Add new item
+        const attributesStr = trimmedInstruction.substring(1).trim();
+        const attributes = parseInstructionAttributes(attributesStr);
+
+        console.log("Parsed attributes for new item:", attributes);
+
+        // Ensure required fields are present
+        if (!attributes.description) {
+          summary.errors.push(
+            `Missing description in add instruction: ${trimmedInstruction}`
+          );
+          continue;
+        }
+
+        // Set defaults for optional fields
+        attributes.quantity = attributes.quantity || 1;
+        attributes.unit_price = attributes.unit_price || 0;
+
+        // Calculate amount if not provided
+        if (!attributes.amount) {
+          attributes.amount = attributes.quantity * attributes.unit_price;
+        }
+
+        // Prepare item data for insertion
+        const itemData = {
+          project_id: projectId,
+          description: attributes.description,
+          // Use title from description if not provided
+          title: attributes.title || attributes.description,
+          quantity: attributes.quantity,
+          unit_price: attributes.unit_price, // Use snake_case to match database column
+          amount: attributes.amount,
+          currency: currency,
+          created_by: userId,
+          // Add additional fields if provided
+          unit_type: attributes.unit_type || "unit",
+          cost_type: attributes.cost_type || "material",
+          is_sub_item: attributes.is_sub_item || false,
+          status: attributes.status || "active",
+          // Store any extra data as JSON
+          data: attributes.data || {
+            ai_generated: true,
+            generation_timestamp: new Date().toISOString(),
+          },
+        };
+
+        console.log("Item data to insert:", itemData);
+
+        // Add parent ID if specified
+        if (attributes.parent) {
+          // Find the parent item by description
+          const { data: parentItems, error: parentError } = await supabase
+            .from("estimate_items")
+            .select("id")
+            .eq("project_id", projectId)
+            .eq("description", attributes.parent)
+            .limit(1);
+
+          if (parentError || !parentItems || parentItems.length === 0) {
+            summary.errors.push(
+              `Could not find parent item: ${attributes.parent}`
+            );
+          } else {
+            // Use parent_item_id to match the database column name
+            itemData.parent_item_id = parentItems[0].id;
+            // Mark as sub-item when parent is specified
+            itemData.is_sub_item = true;
+          }
+        } else if (attributes.parent_id) {
+          // Use parent_item_id to match the database column name
+          itemData.parent_item_id = attributes.parent_id;
+          // Mark as sub-item when parent_id is specified
+          itemData.is_sub_item = true;
+        }
+
+        // Insert the new item
+        const { data: newItem, error } = await supabase
+          .from("estimate_items")
+          .insert(itemData)
+          .select();
+
+        if (error) {
+          console.error("Error adding new item:", error);
+          summary.errors.push(`Error adding new item: ${error.message}`);
+        } else {
+          console.log("Successfully added new item:", newItem);
+          summary.itemsAdded++;
+        }
+      } else {
+        summary.errors.push(
+          `Unknown instruction format: ${trimmedInstruction}`
+        );
+      }
+    }
+
+    return summary;
+  } catch (error) {
+    console.error("Error applying line item changes:", error);
+    throw error;
+  }
+}
+
+/**
+ * Log prompt and actions to the conversation history
+ * @param {number|string} projectId - The ID of the project
+ * @param {string} userId - The ID of the authenticated user
+ * @param {string} userPrompt - The user's prompt
+ * @param {Object} geminiRawResponse - Gemini's raw response
+ * @param {Object} actionSummary - Summary of actions performed
+ * @returns {Promise<Object>} - The created message
+ */
+async function logPromptAndActions(
+  projectId,
+  userId,
+  userPrompt,
+  geminiRawResponse,
+  actionSummary
+) {
+  try {
+    // Get the business ID for the user
+    const { data: businessUsers, error: businessError } = await supabase
+      .from("business_users")
+      .select("business_id")
+      .eq("user_id", userId)
+      .limit(1);
+
+    if (businessError || !businessUsers || businessUsers.length === 0) {
+      throw new Error("Failed to find business for user");
+    }
+
+    const businessId = businessUsers[0].business_id;
+
+    // Get the existing conversation for this project or create a new one
+    const { data: conversations, error: convError } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    let conversationId;
+
+    if (convError || !conversations || conversations.length === 0) {
+      // Create a new conversation if one doesn't exist
+      const { data: newConversation, error: newConvError } = await supabase
+        .from("conversations")
+        .insert({
+          business_id: businessId,
+          project_id: projectId,
+          created_by: userId,
+        })
+        .select()
+        .single();
+
+      if (newConvError) {
+        console.error("Error creating conversation:", newConvError);
+        throw newConvError;
+      }
+
+      conversationId = newConversation.id;
+    } else {
+      conversationId = conversations[0].id;
+    }
+
+    // Store the user prompt as a message
+    const { error: userMsgError } = await supabase.from("messages").insert({
+      conversation_id: conversationId,
+      content: userPrompt,
+      role: "user",
+      user_id: userId,
+    });
+
+    if (userMsgError) {
+      console.error("Error creating user message:", userMsgError);
+    }
+
+    // Store the Gemini response and action summary as a message
+    const { data: message, error: msgError } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        content: JSON.stringify({
+          type: "additional_estimate",
+          raw_response: geminiRawResponse,
+          action_summary: actionSummary,
+          timestamp: new Date().toISOString(),
+        }),
+        role: "assistant",
+        user_id: userId,
+      })
+      .select()
+      .single();
+
+    if (msgError) {
+      console.error("Error creating assistant message:", msgError);
+      throw msgError;
+    }
+
+    return message;
+  } catch (error) {
+    console.error("Error logging prompt and actions:", error);
+    throw error;
+  }
+}
+
+/**
  * Create estimate items for a project
  * @param {number} projectId - The ID of the project
  * @param {Array} estimateItems - Array of estimate items
- * @param {string} userId - The ID of the authenticated user
+ * @param {string} userId - The ID of the user
  * @returns {Promise<Array>} - The created estimate items
  */
 async function createEstimateItems(projectId, estimateItems, userId) {
@@ -245,7 +694,6 @@ async function createEstimateItems(projectId, estimateItems, userId) {
         const item = estimateItems[i];
         const parentItem = createdTopLevelItems[i];
 
-        // Make sure both item and parentItem exist before processing
         if (
           item &&
           parentItem &&
@@ -266,7 +714,6 @@ async function createEstimateItems(projectId, estimateItems, userId) {
       }
     }
 
-    // Insert all sub-items if there are any
     if (allSubItems.length > 0) {
       const { data: createdSubItems, error: subItemsError } = await supabase
         .from("estimate_items")
@@ -277,7 +724,6 @@ async function createEstimateItems(projectId, estimateItems, userId) {
         throw subItemsError;
       }
 
-      // Combine all created items
       return [...createdTopLevelItems, ...createdSubItems];
     }
 
@@ -733,11 +1179,11 @@ async function getConversationsByProjectId(projectId) {
 
 export {
   createProject,
-  createEstimateItems,
   updateProjectWithEstimate,
-  processAndSaveEstimate,
-  calculateTotalFromLineItems,
-  normalizeLineItems,
   getProjectById,
   getConversationsByProjectId,
+  getProjectLineItems,
+  applyLineItemChanges,
+  logPromptAndActions,
+  parseInstructionAttributes,
 };

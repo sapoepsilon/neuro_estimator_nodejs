@@ -1,12 +1,17 @@
 import { generateEstimate, generateAdditionalEstimate } from '../services/geminiService.js';
-import { getProjectById, getConversationsByProjectId, createEstimateItems } from '../services/projectService.js';
-import { supabase } from '../services/supabaseService.js';
+import { 
+  getProjectById, 
+  getConversationsByProjectId, 
+  createProject,
+  getProjectLineItems,
+  applyLineItemChanges,
+  logPromptAndActions
+} from '../services/projectService.js';
 
 /**
  * Validate the request data for the estimator
  * @param {Object} requestData - The data to validate
  * @param {Object} requestData.projectDetails - Details about the project to estimate
- * @param {Object} [requestData.responseStructure] - Optional custom structure for the response
  * @returns {Object|null} - Error object if validation fails, null if successful
  */
 function validateEstimatorRequest(requestData) {
@@ -24,16 +29,6 @@ function validateEstimatorRequest(requestData) {
       status: 400,
       message: 'Project details are required'
     };
-  }
-  
-  // If responseStructure is provided, validate it's a valid object
-  if (requestData.responseStructure !== undefined) {
-    if (typeof requestData.responseStructure !== 'object' || requestData.responseStructure === null) {
-      return {
-        status: 400,
-        message: 'Response structure must be a valid JSON object'
-      };
-    }
   }
 
   return null;
@@ -63,11 +58,59 @@ async function handleEstimatorRequest(req, res) {
       userId: user.id
     };
     
-    // Generate the estimate using Gemini
-    const estimate = await generateEstimate(requestWithUser);
+    // 1. Generate the estimate using Gemini (now returns projectTitle, currency, instructions, rawGeminiResponse)
+    console.log("Generating estimate with data:", JSON.stringify(requestWithUser));
+    const { projectTitle, currency, instructions, rawGeminiResponse } = await generateEstimate(requestWithUser);
     
-    // Return the estimate as JSON
-    return res.json(estimate);
+    console.log("Gemini response processed:", {
+      projectTitle,
+      currency,
+      instructionsCount: instructions.length,
+      firstFewInstructions: instructions.slice(0, 3)
+    });
+    
+    // 2. Create the project record and log the initial Gemini interaction
+    console.log("Creating project with title:", projectTitle);
+    const createdProject = await createProject(
+      { 
+        name: projectTitle, 
+        description: requestData.projectDetails?.description || ''
+      }, 
+      user.id, 
+      0, // Initial total estimate is 0
+      currency, 
+      rawGeminiResponse
+    );
+    
+    console.log("Project created with ID:", createdProject.id);
+    
+    // 3. Apply the line item changes to populate line items
+    const actionSummary = await applyLineItemChanges(
+      createdProject.id, 
+      user.id, 
+      instructions, 
+      currency
+    );
+    
+    // 4. Log the user's original prompt and the actions taken
+    await logPromptAndActions(
+      createdProject.id,
+      user.id,
+      JSON.stringify(requestData.projectDetails),
+      rawGeminiResponse,
+      actionSummary
+    );
+    
+    // 5. Respond to the client with a summary
+    return res.json({
+      success: true,
+      projectId: createdProject.id,
+      projectTitle,
+      currency,
+      itemsAdded: actionSummary.itemsAdded,
+      errors: actionSummary.errors,
+      message: `Created project "${projectTitle}" with ${actionSummary.itemsAdded} line items`
+    });
   } catch (error) {
     console.error('Error in estimator controller:', error);
     return res.status(500).json({ 
@@ -82,7 +125,6 @@ async function handleEstimatorRequest(req, res) {
  * @param {Object} requestData - The data to validate
  * @param {string} requestData.projectId - ID of the existing project
  * @param {string} requestData.prompt - The additional prompt to process
- * @param {Object} [requestData.responseStructure] - Optional custom structure for the response
  * @returns {Object|null} - Error object if validation fails, null if successful
  */
 function validateAdditionalPromptRequest(requestData) {
@@ -109,16 +151,6 @@ function validateAdditionalPromptRequest(requestData) {
       message: 'Prompt is required'
     };
   }
-  
-  // If responseStructure is provided, validate it's a valid object
-  if (requestData.responseStructure !== undefined) {
-    if (typeof requestData.responseStructure !== 'object' || requestData.responseStructure === null) {
-      return {
-        status: 400,
-        message: 'Response structure must be a valid JSON object'
-      };
-    }
-  }
 
   return null;
 }
@@ -141,150 +173,62 @@ async function handleAdditionalPrompt(req, res) {
     // Get the authenticated user from the request (added by verifyAuth middleware)
     const user = req.user;
     
-    // Get the project by ID
-    const project = await getProjectById(requestData.projectId);
+    // 1. Get the project by ID and offset from query params
+    const projectId = requestData.projectId;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    // 2. Fetch the project
+    const project = await getProjectById(projectId);
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
     
-    // Verify that the user has access to this project
-    // This is handled by RLS policies in Supabase, but we'll double-check here
+    // Verify that the user has access to this project (handled by RLS policies in Supabase)
     if (project.business_id) {
-      // The project exists and the user has access (thanks to RLS)
-      // Get existing conversations for this project
-      const conversations = await getConversationsByProjectId(requestData.projectId);
+      // 3. Fetch the current batch of line items with pagination
+      const lineItems = await getProjectLineItems(projectId, offset, 300);
       
-      // Add the user ID and project data to the request data
-      const requestWithContext = {
+      // 4. Generate the additional estimate using Gemini with the existing items
+      const { instructions, rawGeminiResponse } = await generateAdditionalEstimate({
         ...requestData,
         userId: user.id,
         projectId: project.id,
         existingProject: project,
-        existingConversations: conversations
-      };
+        existingItems: lineItems
+      });
       
-      // Generate the additional estimate using Gemini
-      const estimateData = await generateAdditionalEstimate(requestWithContext);
+      // 5. Apply the line item changes
+      const actionSummary = await applyLineItemChanges(
+        projectId, 
+        user.id, 
+        instructions, 
+        project.currency || 'USD'
+      );
       
-      // Extract line items from the estimate
-      const lineItems = estimateData.estimate?.lineItems || [];
+      // 6. Log the prompt, response, and actions
+      await logPromptAndActions(
+        projectId,
+        user.id,
+        requestData.prompt,
+        rawGeminiResponse,
+        actionSummary
+      );
       
-      // If we have line items, save them to the database
-      if (lineItems && lineItems.length > 0) {
-        try {
-          // Get existing estimate items for this project
-          const { data: existingItems, error: itemsError } = await supabase
-            .from("estimate_items")
-            .select("title, description, amount, unit_price, unit_type, cost_type, quantity, data")
-            .eq("project_id", project.id);
-
-          if (itemsError) {
-            console.error("Error fetching existing items:", itemsError);
-            throw itemsError;
-          }
-
-          // Filter out items that appear to be duplicates
-          const uniqueLineItems = lineItems.filter(item => {
-            // Check if this item already exists in the database
-            const isDuplicate = existingItems.some(existingItem => {
-              // Compare title/description (normalized to lowercase)
-              const titleMatch = (
-                (existingItem.title?.toLowerCase() === (item.description || item.title)?.toLowerCase()) ||
-                (existingItem.description?.toLowerCase() === (item.description || item.title)?.toLowerCase())
-              );
-              
-              // Compare amount, unit price, quantity, and cost_type for additional verification
-              const amountMatch = Math.abs(parseFloat(existingItem.amount || 0) - parseFloat(item.amount || 0)) < 0.01;
-              const unitPriceMatch = Math.abs(parseFloat(existingItem.unit_price || 0) - parseFloat(item.unitPrice || 0)) < 0.01;
-              const quantityMatch = Math.abs(parseFloat(existingItem.quantity || 0) - parseFloat(item.quantity || 0)) < 0.01;
-              const costTypeMatch = existingItem.cost_type === item.costType;
-              
-              // Consider it a duplicate if title matches and at least one other property matches
-              return titleMatch && (amountMatch || unitPriceMatch || quantityMatch || costTypeMatch);
-            });
-            
-            return !isDuplicate;
-          });
-          
-          // Only create items that don't already exist
-          const createdItems = uniqueLineItems.length > 0 ? 
-            await createEstimateItems(
-              project.id,
-              uniqueLineItems,
-              user.id
-            ) : [];
-          
-          // Calculate the total from all line items
-          const totalAmount = lineItems.reduce(
-            (sum, item) => sum + parseFloat(item.amount || 0),
-            0
-          );
-          
-          // Store the prompt and response in the conversation
-          let conversationId;
-          
-          if (conversations && conversations.length > 0) {
-            // Use the most recent conversation
-            conversationId = conversations[0].id;
-          } else {
-            // Create a new conversation
-            const { data: conversation, error: convError } = await supabase
-              .from("conversations")
-              .insert({
-                business_id: project.business_id,
-                project_id: project.id,
-                created_by: user.id,
-              })
-              .select()
-              .single();
-
-            if (convError) {
-              console.error("Error creating conversation:", convError);
-              throw convError;
-            }
-            
-            conversationId = conversation.id;
-          }
-          
-          // Store the Gemini response as a message
-          const { error: msgError } = await supabase.from("messages").insert({
-            conversation_id: conversationId,
-            content: JSON.stringify({
-              type: "additional_estimate",
-              prompt: requestData.prompt,
-              items_added: createdItems.length,
-              total_amount: totalAmount,
-            }),
-            role: "assistant",
-            user_id: user.id,
-          });
-
-          if (msgError) {
-            console.error("Error creating message:", msgError);
-            throw msgError;
-          }
-          
-          // Return success response with the number of items added
-          return res.json({
-            success: true,
-            message: lineItems.length === uniqueLineItems.length
-              ? `Added ${createdItems.length} new estimate items to the project`
-              : `Added ${createdItems.length} new unique estimate items to the project (${lineItems.length - uniqueLineItems.length} duplicates were skipped)`,
-            itemsAdded: createdItems.length,
-            duplicatesSkipped: lineItems.length - uniqueLineItems.length
-          });
-        } catch (dbError) {
-          console.error("Error saving additional estimate to database:", dbError);
-          return res.status(500).json({
-            error: "Failed to save estimate items to database",
-            details: dbError.message
-          });
-        }
-      } else {
-        return res.status(400).json({
-          error: "No estimate items were generated from the prompt"
-        });
-      }
+      // 7. Determine if there are more items to fetch
+      const hasMoreItems = lineItems.length === 300; // If we got the max number of items, there might be more
+      const nextOffset = hasMoreItems ? offset + lineItems.length : null;
+      
+      // Return success response with the summary of changes
+      return res.json({
+        success: true,
+        projectId,
+        itemsAdded: actionSummary.itemsAdded,
+        itemsUpdated: actionSummary.itemsUpdated,
+        itemsDeleted: actionSummary.itemsDeleted,
+        errors: actionSummary.errors,
+        nextOffset,
+        message: `Applied ${actionSummary.itemsAdded + actionSummary.itemsUpdated + actionSummary.itemsDeleted} changes to the project`
+      });
     } else {
       return res.status(403).json({ error: 'You do not have access to this project' });
     }
