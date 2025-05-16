@@ -13,7 +13,6 @@ function parseInstructionAttributes(instructionPart) {
   let quoteChar = "";
   let parsingKey = true;
 
-  // Handle special case for ID at the beginning
   if (instructionPart.startsWith("ID:")) {
     const idMatch = instructionPart.match(/^ID:(\d+),?\s*/);
     if (idMatch) {
@@ -22,7 +21,6 @@ function parseInstructionAttributes(instructionPart) {
     }
   }
 
-  // Parse the rest of the attributes
   for (let i = 0; i < instructionPart.length; i++) {
     const char = instructionPart[i];
 
@@ -34,15 +32,13 @@ function parseInstructionAttributes(instructionPart) {
         currentKey += char;
       }
     } else {
-      // Parsing value
       if (!inQuote && (char === "'" || char === '"')) {
         inQuote = true;
         quoteChar = char;
       } else if (inQuote && char === quoteChar) {
         inQuote = false;
       } else if (!inQuote && char === ",") {
-        // End of value
-        attributes[currentKey] = processValue(currentValue.trim());
+        attributes[currentKey] = processValue(currentValue.trim(), currentKey);
         currentKey = "";
         currentValue = "";
         parsingKey = true;
@@ -52,9 +48,8 @@ function parseInstructionAttributes(instructionPart) {
     }
   }
 
-  // Add the last key-value pair if exists
   if (currentKey) {
-    attributes[currentKey] = processValue(currentValue.trim());
+    attributes[currentKey] = processValue(currentValue.trim(), currentKey);
   }
 
   return attributes;
@@ -63,22 +58,33 @@ function parseInstructionAttributes(instructionPart) {
 /**
  * Process a value to convert it to the appropriate type
  * @param {string} value - The value to process
+ * @param {string} [key] - Optional key name to help determine type
  * @returns {any} - The processed value
  */
-function processValue(value) {
-  // Remove quotes if present
+function processValue(value, key) {
+  // Handle quoted strings (remove quotes)
   if (
     (value.startsWith("'") && value.endsWith("'")) ||
     (value.startsWith('"') && value.endsWith('"'))
   ) {
     return value.substring(1, value.length - 1);
   }
+  
+  // Special handling for known text fields
+  if (key && ['cost_type', 'unit_type', 'status'].includes(key)) {
+    return value; // Keep as string even if it looks like a number
+  }
 
-  // Convert to number if it's a number
+  // Convert numeric strings to numbers
   if (!isNaN(value) && value.trim() !== "") {
     return Number(value);
   }
 
+  // Handle boolean values
+  if (value.toLowerCase() === 'true') return true;
+  if (value.toLowerCase() === 'false') return false;
+
+  // Default case
   return value;
 }
 
@@ -101,7 +107,6 @@ async function createProject(
   rawResponse = null
 ) {
   try {
-    // Get the business ID for the user
     const { data: businessUsers, error: businessError } = await supabase
       .from("business_users")
       .select("business_id")
@@ -114,7 +119,6 @@ async function createProject(
 
     const businessId = businessUsers[0].business_id;
 
-    // Create project data
     const projectInsertData = {
       business_id: businessId,
       name: projectData.name,
@@ -123,7 +127,6 @@ async function createProject(
       created_by: userId,
     };
 
-    // Create a new project
     const { data: project, error } = await supabase
       .from("projects")
       .insert(projectInsertData)
@@ -134,10 +137,8 @@ async function createProject(
       throw error;
     }
 
-    // If we have a raw response from Gemini and a project ID, create a conversation and message
     if (rawResponse && project.id) {
       try {
-        // Create a conversation for this estimate
         const { data: conversation, error: convError } = await supabase
           .from("conversations")
           .insert({
@@ -151,7 +152,6 @@ async function createProject(
         if (convError) {
           console.error("Error creating conversation:", convError);
         } else if (conversation && conversation.id) {
-          // Store the Gemini response as a message with XML format
           const { error: msgError } = await supabase.from("messages").insert({
             conversation_id: conversation.id,
             content: JSON.stringify({
@@ -221,7 +221,6 @@ async function updateProjectWithEstimate(
     let conversationId;
 
     if (convError || !conversations || conversations.length === 0) {
-      // Create a new conversation if one doesn't exist
       const { data: newConversation, error: newConvError } = await supabase
         .from("conversations")
         .insert({
@@ -241,9 +240,7 @@ async function updateProjectWithEstimate(
       conversationId = conversations[0].id;
     }
 
-    // If we have a conversation ID, store the updated estimate data
     if (conversationId) {
-      // Only use the columns that are definitely in the schema
       const { error: msgError } = await supabase.from("messages").insert({
         conversation_id: conversationId,
         content: JSON.stringify({
@@ -315,14 +312,6 @@ async function applyLineItemChanges(
   currency = "USD"
 ) {
   try {
-    console.log("applyLineItemChanges called with:", {
-      projectId,
-      userId,
-      instructionsCount: instructions.length,
-      currency,
-    });
-
-    // Initialize counters for summary
     const summary = {
       itemsAdded: 0,
       itemsUpdated: 0,
@@ -330,16 +319,12 @@ async function applyLineItemChanges(
       errors: [],
     };
 
-    // Process each instruction
     for (const instruction of instructions) {
       const trimmedInstruction = instruction.trim();
 
-      // Skip empty instructions
       if (!trimmedInstruction) continue;
 
-      // Determine the action type (add, update, delete)
       if (trimmedInstruction.startsWith("+ ID:")) {
-        // Update existing item
         const idMatch = trimmedInstruction.match(/^\+ ID:(\d+)/);
         if (!idMatch) {
           summary.errors.push(
@@ -354,7 +339,6 @@ async function applyLineItemChanges(
           .trim();
         const attributes = parseInstructionAttributes(attributesStr);
 
-        // Calculate amount if quantity and unit_price are provided but amount is not
         if (
           attributes.quantity &&
           attributes.unit_price &&
@@ -363,13 +347,10 @@ async function applyLineItemChanges(
           attributes.amount = attributes.quantity * attributes.unit_price;
         }
 
-        // Keep keys in snake_case to match database column names
         const updateData = {};
         for (const [key, value] of Object.entries(attributes)) {
-          // All keys should remain in snake_case to match database columns
           if (key === "unit_price") updateData.unit_price = value;
           else if (key === "parent_id") updateData.parent_item_id = value;
-          // Correct column name is parent_item_id
           else if (key === "title") updateData.title = value;
           else if (key === "unit_type") updateData.unit_type = value;
           else if (key === "cost_type") updateData.cost_type = value;
@@ -377,15 +358,38 @@ async function applyLineItemChanges(
           else if (key === "data") updateData.data = value;
           else updateData[key] = value;
         }
+        
+        // If description is being updated, determine the appropriate cost_type
+        if (attributes.description && !attributes.cost_type) {
+          const description = attributes.description.toLowerCase();
+          
+          // Determine cost_type based on keywords in the description
+          if (description.includes('admin')) {
+            updateData.cost_type = 'admin';
+          } else if (description.includes('equipment') || description.includes('tool') || 
+                    description.includes('machine') || description.includes('device')) {
+            updateData.cost_type = 'equipment';
+          } else if (description.includes('labor') || description.includes('work') || 
+                    description.includes('service') || description.includes('hour') || 
+                    description.includes('installation')) {
+            updateData.cost_type = 'labor';
+          } else if (description.includes('material') || description.includes('supply') || 
+                    description.includes('part') || description.includes('component')) {
+            updateData.cost_type = 'material';
+          } else if (description.includes('overhead') || description.includes('indirect') || 
+                    description.includes('administrative')) {
+            updateData.cost_type = 'overhead';
+          } else {
+            updateData.cost_type = 'other'; // Default to 'other' if no match
+          }
+          
+          console.log(`Automatically set cost_type to '${updateData.cost_type}' based on description for item ID:${itemId}`);
+        }
 
-        // If description is updated, update title too if title is not explicitly provided
         if (updateData.description && !updateData.title) {
           updateData.title = updateData.description;
         }
 
-        console.log("Update data for item ID:", itemId, updateData);
-
-        // Update the item in the database
         const { error } = await supabase
           .from("estimate_items")
           .update(updateData)
@@ -402,7 +406,6 @@ async function applyLineItemChanges(
           summary.itemsUpdated++;
         }
       } else if (trimmedInstruction.startsWith("- ID:")) {
-        // Delete item
         const idMatch = trimmedInstruction.match(/^- ID:(\d+)/);
         if (!idMatch) {
           summary.errors.push(
@@ -413,9 +416,6 @@ async function applyLineItemChanges(
 
         const itemId = parseInt(idMatch[1], 10);
 
-        console.log("Deleting item ID:", itemId);
-
-        // Delete the item from the database
         const { error } = await supabase
           .from("estimate_items")
           .delete()
@@ -432,13 +432,9 @@ async function applyLineItemChanges(
           summary.itemsDeleted++;
         }
       } else if (trimmedInstruction.startsWith("+")) {
-        // Add new item
         const attributesStr = trimmedInstruction.substring(1).trim();
         const attributes = parseInstructionAttributes(attributesStr);
 
-        console.log("Parsed attributes for new item:", attributes);
-
-        // Ensure required fields are present
         if (!attributes.description) {
           summary.errors.push(
             `Missing description in add instruction: ${trimmedInstruction}`
@@ -446,29 +442,51 @@ async function applyLineItemChanges(
           continue;
         }
 
-        // Set defaults for optional fields
         attributes.quantity = attributes.quantity || 1;
         attributes.unit_price = attributes.unit_price || 0;
 
-        // Calculate amount if not provided
         if (!attributes.amount) {
           attributes.amount = attributes.quantity * attributes.unit_price;
         }
+        
+        // Determine cost_type based on description if not explicitly provided
+        let costType = attributes.cost_type;
+        if (!costType && attributes.description) {
+          const description = attributes.description.toLowerCase();
+          
+          if (description.includes('admin')) {
+            costType = 'admin';
+          } else if (description.includes('equipment') || description.includes('tool') || 
+                    description.includes('machine') || description.includes('device')) {
+            costType = 'equipment';
+          } else if (description.includes('labor') || description.includes('work') || 
+                    description.includes('service') || description.includes('hour') || 
+                    description.includes('installation')) {
+            costType = 'labor';
+          } else if (description.includes('material') || description.includes('supply') || 
+                    description.includes('part') || description.includes('component')) {
+            costType = 'material';
+          } else if (description.includes('overhead') || description.includes('indirect') || 
+                    description.includes('administrative')) {
+            costType = 'overhead';
+          } else {
+            costType = 'other'; // Default to 'other' if no match
+          }
+          
+          console.log(`Automatically determined cost_type as '${costType}' based on description`);
+        }
 
-        // Prepare item data for insertion
         const itemData = {
           project_id: projectId,
           description: attributes.description,
-          // Use title from description if not provided
           title: attributes.title || attributes.description,
           quantity: attributes.quantity,
-          unit_price: attributes.unit_price, // Use snake_case to match database column
+          unit_price: attributes.unit_price,
           amount: attributes.amount,
           currency: currency,
           created_by: userId,
-          // Add additional fields if provided
           unit_type: attributes.unit_type || "unit",
-          cost_type: attributes.cost_type || "material",
+          cost_type: costType || "material", // Use determined cost_type or default to material
           is_sub_item: attributes.is_sub_item || false,
           status: attributes.status || "active",
           // Store any extra data as JSON
@@ -478,11 +496,7 @@ async function applyLineItemChanges(
           },
         };
 
-        console.log("Item data to insert:", itemData);
-
-        // Add parent ID if specified
         if (attributes.parent) {
-          // Find the parent item by description
           const { data: parentItems, error: parentError } = await supabase
             .from("estimate_items")
             .select("id")
@@ -495,19 +509,14 @@ async function applyLineItemChanges(
               `Could not find parent item: ${attributes.parent}`
             );
           } else {
-            // Use parent_item_id to match the database column name
             itemData.parent_item_id = parentItems[0].id;
-            // Mark as sub-item when parent is specified
             itemData.is_sub_item = true;
           }
         } else if (attributes.parent_id) {
-          // Use parent_item_id to match the database column name
           itemData.parent_item_id = attributes.parent_id;
-          // Mark as sub-item when parent_id is specified
           itemData.is_sub_item = true;
         }
 
-        // Insert the new item
         const { data: newItem, error } = await supabase
           .from("estimate_items")
           .insert(itemData)
@@ -1130,7 +1139,6 @@ async function getProjectById(projectId) {
  */
 async function getConversationsByProjectId(projectId) {
   try {
-    // Get conversations for this project
     const { data: conversations, error: convError } = await supabase
       .from("conversations")
       .select("id, created_at, created_by")
@@ -1142,7 +1150,6 @@ async function getConversationsByProjectId(projectId) {
       return [];
     }
 
-    // For each conversation, get the messages
     const conversationsWithMessages = await Promise.all(
       conversations.map(async (conversation) => {
         const { data: messages, error: msgError } = await supabase
@@ -1156,7 +1163,6 @@ async function getConversationsByProjectId(projectId) {
           return { ...conversation, messages: [] };
         }
 
-        // Parse JSON content in messages
         const parsedMessages = messages.map((message) => {
           try {
             const content = JSON.parse(message.content);
@@ -1165,7 +1171,6 @@ async function getConversationsByProjectId(projectId) {
             return message;
           }
         });
-
         return { ...conversation, messages: parsedMessages };
       })
     );
