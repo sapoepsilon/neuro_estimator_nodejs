@@ -692,14 +692,65 @@ function validateAndNormalizeActions(actions, changeType = 'general') {
 
 // Helper function to update a line item
 async function updateLineItem(projectId, itemId, updates, userId) {
-  // Implementation depends on your database schema
-  // This is a simplified example
+  // Get the current item to merge with existing data field
+  const { data: currentItem, error: fetchError } = await supabase
+    .from('estimate_items')
+    .select('data')
+    .eq('id', itemId)
+    .eq('project_id', projectId)
+    .single();
+    
+  if (fetchError) throw fetchError;
+  
+  // Extract custom column data from updates
+  const { 
+    title, 
+    description, 
+    quantity, 
+    unit_price, 
+    unit_type, 
+    cost_type, 
+    amount, 
+    currency,
+    total_amount,
+    status,
+    parent_item_id,
+    is_sub_item,
+    // Exclude any fields that are part of the standard schema
+    // Keep all other fields as customFields
+    ...customFields 
+  } = updates;
+  
+  // Prepare standard fields update
+  const standardFieldsUpdate = {
+    ...(title !== undefined && { title }),
+    ...(description !== undefined && { description }),
+    ...(quantity !== undefined && { quantity }),
+    ...(unit_price !== undefined && { unit_price }),
+    ...(unit_type !== undefined && { unit_type }),
+    ...(cost_type !== undefined && { cost_type }),
+    ...(amount !== undefined && { amount }),
+    ...(currency !== undefined && { currency }),
+    ...(total_amount !== undefined && { total_amount }),
+    ...(status !== undefined && { status }),
+    ...(parent_item_id !== undefined && { parent_item_id }),
+    ...(is_sub_item !== undefined && { is_sub_item }),
+    updated_at: new Date().toISOString(),
+    updated_by: userId
+  };
+  
+  // Merge existing data with new custom fields
+  const updatedData = {
+    ...(currentItem?.data || {}),
+    ...customFields
+  };
+  
+  // Update the item with both standard fields and custom fields in the data JSON
   const { data, error } = await supabase
     .from('estimate_items')
     .update({
-      ...updates,
-      updated_at: new Date().toISOString(),
-      updated_by: userId
+      ...standardFieldsUpdate,
+      data: updatedData
     })
     .eq('id', itemId)
     .eq('project_id', projectId)
@@ -737,13 +788,19 @@ async function duplicateLineItem(projectId, itemId, userId) {
   // Remove the ID to create a new record
   const { id, created_at, updated_at, ...itemData } = item;
   
+  // Ensure data field is preserved - this contains all custom column values
+  const dataField = itemData.data || {};
+  
   // Create the duplicate
   const { data: newItem, error: createError } = await supabase
     .from('estimate_items')
     .insert([{
       ...itemData,
+      data: dataField, // Explicitly include the data field with custom column values
       created_by: userId,
-      updated_by: userId
+      updated_by: userId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     }])
     .select();
     
