@@ -5,10 +5,10 @@ import { XMLParser } from "fast-xml-parser";
 
 /**
  * Get the Gemini model instance for the estimator
- * @returns {Object} The model instance
+ * @returns {Object} The GoogleGenAI client instance
  */
 function getEstimatorModel() {
-  return getModel(GEMINI_MODELS.FLASH_2_0_001, MODEL_CONFIGS.ESTIMATOR);
+  return getModel(); // getModel now returns the configured client
 }
 
 /**
@@ -163,12 +163,19 @@ function processGeminiResponse(responseText) {
  */
 async function generateEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
+    const genAIClient = getEstimatorModel();
+    console.log("genAIClient type:", typeof genAIClient, "genAIClient object:", genAIClient);
     const prompt = prepareEstimatorPrompt(requestData);
 
     // Generate content from Gemini
-    const result = await model.generateContent(prompt);
+    const result = await genAIClient.models.generateContent({
+        model: GEMINI_MODELS.FLASH_2_0_001,
+        contents: prompt,
+        generationConfig: MODEL_CONFIGS.ESTIMATOR
+    });
     const responseText = result.response.text();
+    console.log("Raw Gemini Response Text:", responseText);
+    console.log("Full Gemini Result:", JSON.stringify(result, null, 2));
 
     // Store the raw response text for debugging/logging
     const rawGeminiResponse = {
@@ -204,11 +211,15 @@ async function generateEstimate(requestData) {
  */
 async function generateAdditionalEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
+    const genAIClient = getEstimatorModel();
     const prompt = prepareAdditionalEstimatorPrompt(requestData);
 
     // Generate content from Gemini
-    const result = await model.generateContent(prompt);
+    const result = await genAIClient.models.generateContent({
+        model: GEMINI_MODELS.FLASH_2_0_001,
+        contents: prompt,
+        generationConfig: MODEL_CONFIGS.ESTIMATOR
+    });
     const responseText = result.response.text();
 
     // Store the raw response text for debugging/logging
