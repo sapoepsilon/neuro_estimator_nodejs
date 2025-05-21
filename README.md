@@ -218,3 +218,68 @@ The response will follow your custom structure:
 ## Port
 
 The application runs on port 8080 by default. You can change this by setting the PORT environment variable.
+
+## Authentication
+
+This application uses Application Default Credentials (ADC) for authenticating to Google Cloud services, including the Gemini API via Vertex AI.
+
+### Local Development
+
+For local development, you need to authenticate using the Google Cloud CLI:
+
+1.  Install the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install).
+2.  Log in with your user credentials:
+    ```bash
+    gcloud auth login
+    ```
+3.  Set up Application Default Credentials:
+    ```bash
+    gcloud auth application-default login
+    ```
+    This command will create a credential file in your user's home directory. The client libraries will automatically find and use these credentials.
+
+    Alternatively, you can create a service account, download its JSON key file, and set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of this key file:
+    ```bash
+    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/keyfile.json"
+    ```
+    Ensure the service account has the necessary IAM roles (e.g., "Vertex AI User" or more specific roles for Gemini) on your project.
+
+### Deployed GCP Environments
+
+When running in a Google Cloud environment (e.g., Google Compute Engine, Google Kubernetes Engine, Cloud Run, Cloud Functions):
+
+*   The application will automatically use the credentials of the service account attached to the resource (e.g., GCE instance's service account).
+*   Ensure that this service account has the necessary IAM permissions (e.g., "Vertex AI User") for the project where the Gemini models are accessed.
+
+### Required Environment Variables for Vertex AI
+
+The application also expects the following environment variables to be set, which are used by the Vertex AI client:
+
+*   `GOOGLE_CLOUD_PROJECT`: Your Google Cloud Project ID.
+*   `GOOGLE_CLOUD_LOCATION`: The Google Cloud region/location for Vertex AI services (e.g., `us-central1`).
+
+These variables are used in `aimodel/aiClient.js` when initializing the Vertex AI client.
+
+### For Playwright MCP Function Calling
+
+This application can optionally integrate with a [Playwright MCP server](https://github.com/microsoft/playwright-mcp) to allow Gemini to perform browser automation tasks (e.g., navigating web pages, extracting information, clicking elements). This is achieved using Gemini's function calling feature.
+
+**1. Running the Playwright MCP Server:**
+
+To use this feature, you need to have a Playwright MCP server running. You can typically start one using npx:
+
+```bash
+npx @playwright/mcp@latest --port 8931
+```
+This will start the server on `http://localhost:8931`. The default transport endpoint used by the application will be `http://localhost:8931/sse`. Make sure the browser you want to automate (e.g., Chrome, Firefox, Webkit) is installed by Playwright (`npx playwright install`).
+
+**2. Environment Variables:**
+
+*   `ENABLE_PLAYWRIGHT_MCP_TOOLS`: Set this to `true` to enable the Playwright MCP tools to be available to Gemini. If not set or set to `false`, these tools will not be advertised to Gemini, and the function calling feature for browser automation will be disabled.
+    ```bash
+    export ENABLE_PLAYWRIGHT_MCP_TOOLS="true"
+    ```
+*   `PLAYWRIGHT_MCP_URL`: The URL of the running Playwright MCP server's SSE endpoint. If you start the server as shown above, this would be:
+    ```bash
+    export PLAYWRIGHT_MCP_URL="http://localhost:8931/sse"
+    ```

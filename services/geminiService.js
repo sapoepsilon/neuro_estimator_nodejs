@@ -1,14 +1,16 @@
 import { getModel } from "../aimodel/aiClient.js";
 import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
+import { playwrightMcpTools } from "../aimodel/playwrightMcpTools.js";
+import { callPlaywrightMcpTool } from "./playwrightMcpClient.js";
 import { supabase } from "./supabaseService.js";
 import { XMLParser } from "fast-xml-parser";
 
 /**
  * Get the Gemini model instance for the estimator
- * @returns {Object} The model instance
+ * @returns {Object} The GoogleGenAI client instance
  */
 function getEstimatorModel() {
-  return getModel(GEMINI_MODELS.FLASH_2_0_001, MODEL_CONFIGS.ESTIMATOR);
+  return getModel(); // getModel now returns the configured client
 }
 
 /**
@@ -163,14 +165,71 @@ function processGeminiResponse(responseText) {
  */
 async function generateEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
+    const genAIClient = getEstimatorModel();
+    console.log("genAIClient type:", typeof genAIClient, "genAIClient object:", genAIClient);
     const prompt = prepareEstimatorPrompt(requestData);
 
-    // Generate content from Gemini
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    let geminiTools = [];
+    if (process.env.ENABLE_PLAYWRIGHT_MCP_TOOLS === 'true') {
+      geminiTools = [{ functionDeclarations: playwrightMcpTools }];
+      console.log("Playwright MCP tools enabled for Gemini call in generateEstimate.");
+    }
 
-    // Store the raw response text for debugging/logging
+    // Generate content from Gemini
+    const result = await genAIClient.models.generateContent({
+        model: GEMINI_MODELS.FLASH_2_0_001,
+        contents: prompt,
+        generationConfig: MODEL_CONFIGS.ESTIMATOR,
+        tools: geminiTools
+    });
+    const response = result.response;
+    let responseText = response.text(); // Initial response text
+
+    console.log("Raw Gemini Response Text (initial):", responseText);
+    console.log("Full Gemini Result (initial):", JSON.stringify(result, null, 2));
+
+    if (response.functionCalls && response.functionCalls.length > 0) {
+      console.log("Gemini wants to make a function call(s) in generateEstimate:", JSON.stringify(response.functionCalls, null, 2));
+      const functionCall = response.functionCalls[0]; // Assuming one call for simplicity
+      const toolName = functionCall.name;
+      const toolArgs = functionCall.args;
+
+      console.log(`Executing Playwright MCP tool: ${toolName} with args:`, toolArgs);
+      try {
+        const toolResponseContent = await callPlaywrightMcpTool(toolName, toolArgs);
+
+        const currentConversationParts = [
+          response.candidates[0].content, // Previous model output (the function call itself)
+          {
+            functionResponse: {
+              name: toolName,
+              response: toolResponseContent,
+            },
+          },
+        ];
+        
+        console.log("Sending function response back to Gemini in generateEstimate:", JSON.stringify(currentConversationParts, null, 2));
+
+        const followupResult = await genAIClient.models.generateContent({
+            model: GEMINI_MODELS.FLASH_2_0_001,
+            contents: currentConversationParts,
+            generationConfig: MODEL_CONFIGS.ESTIMATOR,
+            tools: geminiTools 
+        });
+
+        result = followupResult; // Overwrite original result
+        response = result.response; // Update response
+        responseText = response.text(); // Get the new response text
+        console.log("Received final response from Gemini after function call in generateEstimate:", responseText);
+
+      } catch (toolError) {
+        console.error(`Error executing tool ${toolName} in generateEstimate:`, toolError);
+        // Let it proceed, processGeminiResponse might fail or Gemini might comment on the error.
+        // A more robust impl. would send a FunctionResponse indicating the error.
+      }
+    }
+
+    // Store the raw response text for debugging/logging (now potentially from the second call)
     const rawGeminiResponse = {
       text: responseText,
       timestamp: new Date().toISOString(),
@@ -204,14 +263,65 @@ async function generateEstimate(requestData) {
  */
 async function generateAdditionalEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
+    const genAIClient = getEstimatorModel();
     const prompt = prepareAdditionalEstimatorPrompt(requestData);
 
-    // Generate content from Gemini
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    let geminiTools = [];
+    if (process.env.ENABLE_PLAYWRIGHT_MCP_TOOLS === 'true') {
+      geminiTools = [{ functionDeclarations: playwrightMcpTools }];
+      console.log("Playwright MCP tools enabled for Gemini call in generateAdditionalEstimate.");
+    }
 
-    // Store the raw response text for debugging/logging
+    // Generate content from Gemini
+    const result = await genAIClient.models.generateContent({
+        model: GEMINI_MODELS.FLASH_2_0_001,
+        contents: prompt,
+        generationConfig: MODEL_CONFIGS.ESTIMATOR,
+        tools: geminiTools
+    });
+    let response = result.response;
+    let responseText = response.text(); // Initial response text
+
+    if (response.functionCalls && response.functionCalls.length > 0) {
+      console.log("Gemini wants to make a function call(s) in generateAdditionalEstimate:", JSON.stringify(response.functionCalls, null, 2));
+      const functionCall = response.functionCalls[0]; // Assuming one call
+      const toolName = functionCall.name;
+      const toolArgs = functionCall.args;
+
+      console.log(`Executing Playwright MCP tool: ${toolName} with args:`, toolArgs);
+      try {
+        const toolResponseContent = await callPlaywrightMcpTool(toolName, toolArgs);
+        
+        const currentConversationParts = [
+          response.candidates[0].content, // Previous model output
+          {
+            functionResponse: {
+              name: toolName,
+              response: toolResponseContent,
+            },
+          },
+        ];
+
+        console.log("Sending function response back to Gemini in generateAdditionalEstimate:", JSON.stringify(currentConversationParts, null, 2));
+
+        const followupResult = await genAIClient.models.generateContent({
+            model: GEMINI_MODELS.FLASH_2_0_001,
+            contents: currentConversationParts,
+            generationConfig: MODEL_CONFIGS.ESTIMATOR,
+            tools: geminiTools
+        });
+
+        result = followupResult; // Overwrite
+        response = result.response; // Update response
+        responseText = response.text(); // Update responseText
+        console.log("Received final response from Gemini after function call in generateAdditionalEstimate:", responseText);
+
+      } catch (toolError) {
+        console.error(`Error executing tool ${toolName} in generateAdditionalEstimate:`, toolError);
+      }
+    }
+
+    // Store the raw response text for debugging/logging (now potentially from the second call)
     const rawGeminiResponse = {
       text: responseText,
       timestamp: new Date().toISOString(),
