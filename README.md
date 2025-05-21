@@ -259,3 +259,27 @@ The application also expects the following environment variables to be set, whic
 *   `GOOGLE_CLOUD_LOCATION`: The Google Cloud region/location for Vertex AI services (e.g., `us-central1`).
 
 These variables are used in `aimodel/aiClient.js` when initializing the Vertex AI client.
+
+### For Playwright MCP Function Calling
+
+This application can optionally integrate with a [Playwright MCP server](https://github.com/microsoft/playwright-mcp) to allow Gemini to perform browser automation tasks (e.g., navigating web pages, extracting information, clicking elements). This is achieved using Gemini's function calling feature.
+
+**1. Running the Playwright MCP Server:**
+
+To use this feature, you need to have a Playwright MCP server running. You can typically start one using npx:
+
+```bash
+npx @playwright/mcp@latest --port 8931
+```
+This will start the server on `http://localhost:8931`. The default transport endpoint used by the application will be `http://localhost:8931/sse`. Make sure the browser you want to automate (e.g., Chrome, Firefox, Webkit) is installed by Playwright (`npx playwright install`).
+
+**2. Environment Variables:**
+
+*   `ENABLE_PLAYWRIGHT_MCP_TOOLS`: Set this to `true` to enable the Playwright MCP tools to be available to Gemini. If not set or set to `false`, these tools will not be advertised to Gemini, and the function calling feature for browser automation will be disabled.
+    ```bash
+    export ENABLE_PLAYWRIGHT_MCP_TOOLS="true"
+    ```
+*   `PLAYWRIGHT_MCP_URL`: The URL of the running Playwright MCP server's SSE endpoint. If you start the server as shown above, this would be:
+    ```bash
+    export PLAYWRIGHT_MCP_URL="http://localhost:8931/sse"
+    ```
