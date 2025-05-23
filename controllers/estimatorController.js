@@ -750,7 +750,9 @@ async function updateLineItem(projectId, itemId, updates, userId) {
     .from('estimate_items')
     .update({
       ...standardFieldsUpdate,
-      data: updatedData
+      data: updatedData,
+      updated_at: new Date().toISOString(),
+      updated_by: userId
     })
     .eq('id', itemId)
     .eq('project_id', projectId)

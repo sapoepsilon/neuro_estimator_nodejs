@@ -62,3 +62,26 @@ FROM public.businesses;
 
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_custom_columns_business_id ON public.custom_columns(business_id);
+
+
+-- Create a function to remove a specific key from the data JSONB column in estimate_items
+CREATE OR REPLACE FUNCTION public.remove_column_from_data(column_key TEXT)
+RETURNS INTEGER AS $$
+DECLARE
+  updated_count INTEGER;
+BEGIN
+  -- Update all estimate_items that have the specified key in their data column
+  WITH updated_items AS (
+    UPDATE public.estimate_items
+    SET data = data - column_key
+    WHERE data ? column_key
+    RETURNING id
+  )
+  SELECT COUNT(*) INTO updated_count FROM updated_items;
+  
+  RETURN updated_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute permission to authenticated users
+GRANT EXECUTE ON FUNCTION public.remove_column_from_data(TEXT) TO authenticated;
