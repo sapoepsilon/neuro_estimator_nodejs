@@ -10,6 +10,7 @@
 const GEMINI_MODELS = {
   /** Gemini Flash 002 - Fast and efficient model */
   FLASH_2_0_001: "gemini-2.0-flash-001",
+  FLASH_2_5_04_17_PREVIEW: "gemini-2.5-flash-preview-04-17",
 };
 
 /**
@@ -27,7 +28,4 @@ const MODEL_CONFIGS = {
   // Add more configurations as needed
 };
 
-export {
-  GEMINI_MODELS,
-  MODEL_CONFIGS,
-};
+export { GEMINI_MODELS, MODEL_CONFIGS };

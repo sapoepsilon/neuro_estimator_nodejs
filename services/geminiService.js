@@ -2,7 +2,13 @@ import { getModel } from "../aimodel/aiClient.js";
 import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
 import { supabase } from "./supabaseService.js";
 import { XMLParser } from "fast-xml-parser";
-
+import {
+  GoogleGenAI,
+  FunctionCallingConfigMode,
+  mcpToTool,
+} from "@google/genai";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 /**
  * Get the Gemini model instance for the estimator
  * @returns {Object} The model instance
@@ -58,16 +64,24 @@ function prepareAdditionalEstimatorPrompt(requestData) {
   const { prompt, existingProject, existingItems = [] } = requestData;
 
   // Format existing items for context
-  const formattedItems = existingItems.map(item => {
-    return `ID:${item.id}, description='${item.description}', quantity=${item.quantity}, unit_price=${item.unitPrice}, amount=${item.amount}${item.parentId ? `, parent_id=${item.parentId}` : ''}`;
-  }).join('\n');
+  const formattedItems = existingItems
+    .map((item) => {
+      return `ID:${item.id}, description='${item.description}', quantity=${
+        item.quantity
+      }, unit_price=${item.unitPrice}, amount=${item.amount}${
+        item.parentId ? `, parent_id=${item.parentId}` : ""
+      }`;
+    })
+    .join("\n");
 
   return `
-    You are an estimator agent. You have previously created an estimate for a project titled "${existingProject.name || 'Untitled Project'}". 
+    You are an estimator agent. You have access to a web browser tool to test the prices if the user requests it. You have previously created an estimate for a project titled "${
+      existingProject.name || "Untitled Project"
+    }". 
     Now you need to modify the estimate based on the following additional request.
     
     Current line items:
-    ${formattedItems || 'No existing items'}
+    ${formattedItems || "No existing items"}
     
     Additional request from the user:
     ${prompt}
@@ -85,6 +99,8 @@ function prepareAdditionalEstimatorPrompt(requestData) {
     1. For adding new items: Start with '+' followed by attributes (description, quantity, unit_price, amount)
     2. For updating existing items: Start with '+' followed by the item ID and the attributes to update
     3. For deleting items: Start with '-' followed by the item ID
+    4. We now support tools to browse internet. If you notice that there is a link we should use the playwright tool to browse the internet
+       a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter
     
     Do not include any other text, explanations, or formatting outside of this XML structure.
   `;
@@ -99,56 +115,56 @@ function processGeminiResponse(responseText) {
   try {
     // Extract XML if it's wrapped in markdown code blocks
     let xmlString = responseText;
-    
+
     // Check if the response is wrapped in markdown code blocks
     const xmlRegex = /\`\`\`(?:xml)?\s*([\s\S]*?)\`\`\`/;
     const match = responseText.match(xmlRegex);
-    
+
     if (match && match[1]) {
       xmlString = match[1].trim();
     }
-    
+
     // Look for XML tags if not found in code blocks
-    if (!xmlString.includes('<estimate>')) {
+    if (!xmlString.includes("<estimate>")) {
       const estimateTagRegex = /<estimate>[\s\S]*<\/estimate>/;
       const estimateMatch = responseText.match(estimateTagRegex);
-      
+
       if (estimateMatch) {
         xmlString = estimateMatch[0];
       }
     }
-    
+
     // Parse the XML
     const parser = new XMLParser({
       ignoreAttributes: false,
-      attributeNamePrefix: ""
+      attributeNamePrefix: "",
     });
-    
+
     const result = parser.parse(xmlString);
-    
+
     if (!result.estimate) {
       throw new Error("Missing estimate data in XML response");
     }
-    
+
     // Extract the project title, currency, and action instructions
     const projectTitle = result.estimate.project_title || "Untitled Project";
     const currency = result.estimate.currency || "USD";
-    
+
     // Extract action instructions
     let instructions = [];
     if (result.estimate.actions && result.estimate.actions.action) {
       // Handle both single action and array of actions
-      const actions = Array.isArray(result.estimate.actions.action) 
-        ? result.estimate.actions.action 
+      const actions = Array.isArray(result.estimate.actions.action)
+        ? result.estimate.actions.action
         : [result.estimate.actions.action];
-      
-      instructions = actions.map(action => action.toString().trim());
+
+      instructions = actions.map((action) => action.toString().trim());
     }
-    
+
     return {
       projectTitle,
       currency,
-      instructions
+      instructions,
     };
   } catch (error) {
     console.error("Error processing XML response:", error);
@@ -163,12 +179,35 @@ function processGeminiResponse(responseText) {
  */
 async function generateEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
-    const prompt = prepareEstimatorPrompt(requestData);
+    const playwright = new StdioClientTransport({
+      command: "npx",
+      args: [
+        "-y",
+        "@playwright/mcp@latest",
+        "--no-sandbox",
+        "--user-data-dir=/Users/ismatullamansurov/Library/Caches/ms-playwright/chromium-1148",
+      ], // MCP Server
+    });
 
-    // Generate content from Gemini
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    const playwrightMcpClient = new Client({
+      name: "Playwright",
+      version: "1.0.0",
+    });
+
+    await playwrightMcpClient.connect(playwright);
+
+    const prompt = prepareEstimatorPrompt(requestData);
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    console.log(`prompt in gemini service`, prompt);
+    const result = await ai.models.generateContent({
+      model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
+      contents: prompt,
+      config: {
+        tools: [mcpToTool(playwrightMcpClient)],
+      },
+    });
+
+    const responseText = result.candidates[0].content.parts[0].text;
 
     // Store the raw response text for debugging/logging
     const rawGeminiResponse = {
@@ -178,14 +217,15 @@ async function generateEstimate(requestData) {
     };
 
     // Process and validate the response
-    const { projectTitle, currency, instructions } = processGeminiResponse(responseText);
+    const { projectTitle, currency, instructions } =
+      processGeminiResponse(responseText);
 
     // Return the structured data
     return {
       projectTitle,
       currency,
       instructions,
-      rawGeminiResponse
+      rawGeminiResponse,
     };
   } catch (error) {
     console.error("Error generating estimate:", error);
@@ -204,12 +244,40 @@ async function generateEstimate(requestData) {
  */
 async function generateAdditionalEstimate(requestData) {
   try {
-    const model = getEstimatorModel();
     const prompt = prepareAdditionalEstimatorPrompt(requestData);
 
-    // Generate content from Gemini
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    // Set up Playwright client for MCP
+    const playwright = new StdioClientTransport({
+      command: "npx",
+      args: ["-y", "@playwright/mcp@latest"],
+    });
+
+    const playwrightMcpClient = new Client({
+      name: "Playwright",
+      version: "1.0.0",
+    });
+
+    await playwrightMcpClient.connect(playwright);
+
+    // Initialize Gemini with the Playwright tool
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    console.log(`prompt in gemini service`, prompt);
+
+    // Generate content with tool enabled
+    const result = await ai.models.generateContent({
+      model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
+      contents: prompt,
+      config: {
+        tools: [mcpToTool(playwrightMcpClient)],
+      },
+    });
+
+    console.log(
+      `automatic function calling history amount`,
+      result.automaticFunctionCallingHistory.length
+    );
+    console.log(`result`, result);
+    const responseText = result.candidates[0].content.parts[0].text;
 
     // Store the raw response text for debugging/logging
     const rawGeminiResponse = {
@@ -220,11 +288,11 @@ async function generateAdditionalEstimate(requestData) {
 
     // Process and validate the response
     const { instructions } = processGeminiResponse(responseText);
-
+    playwrightMcpClient.close();
     // Return the structured data
     return {
       instructions,
-      rawGeminiResponse
+      rawGeminiResponse,
     };
   } catch (error) {
     console.error("Error generating additional estimate:", error);
