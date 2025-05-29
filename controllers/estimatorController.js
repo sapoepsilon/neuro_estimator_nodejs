@@ -14,11 +14,10 @@ import {
 /**
  * Validate the request data for the estimator
  * @param {Object} requestData - The data to validate
- * @param {Object} requestData.projectDetails - Details about the project to estimate
+ * @param {string} requestData.prompt - The construction project prompt
  * @returns {Object|null} - Error object if validation fails, null if successful
  */
 function validateEstimatorRequest(requestData) {
-  // Check if request data exists
   if (!requestData || Object.keys(requestData).length === 0) {
     return {
       status: 400,
@@ -26,11 +25,10 @@ function validateEstimatorRequest(requestData) {
     };
   }
 
-  // Check if project details are provided
-  if (!requestData.projectDetails) {
+  if (!requestData.prompt || typeof requestData.prompt !== 'string' || !requestData.prompt.trim()) {
     return {
       status: 400,
-      message: "Project details are required",
+      message: "Prompt is required and must be a non-empty string",
     };
   }
 
@@ -46,7 +44,6 @@ async function handleEstimatorRequest(req, res) {
   try {
     const requestData = req.body;
 
-    // Validate the request
     const validationError = validateEstimatorRequest(requestData);
     if (validationError) {
       return res
@@ -54,35 +51,33 @@ async function handleEstimatorRequest(req, res) {
         .json({ error: validationError.message });
     }
 
-    // Get the authenticated user from the request (added by verifyAuth middleware)
     const user = req.user;
+    const prompt = requestData.prompt.trim();
+    
+    // Generate project name from prompt (first 50 characters or until punctuation)
+    let projectName = prompt.length > 50 ? prompt.substring(0, 50).trim() + "..." : prompt;
+    const punctuationIndex = projectName.search(/[.!?]/);
+    if (punctuationIndex > 0 && punctuationIndex < projectName.length - 3) {
+      projectName = projectName.substring(0, punctuationIndex);
+    }
 
-    // Add the user ID to the request data for tracking who created the estimate
     const requestWithUser = {
-      ...requestData,
+      prompt: prompt,
+      projectDetails: {
+        title: projectName,
+        description: prompt
+      },
       userId: user.id,
     };
 
-    console.log(
-      "Generating estimate with data:",
-      JSON.stringify(requestWithUser)
-    );
+    // Generate construction estimate using AI
     const { projectTitle, currency, instructions, rawGeminiResponse } =
       await generateEstimate(requestWithUser);
 
-    console.log("Gemini response processed:", {
-      projectTitle,
-      currency,
-      instructionsCount: instructions.length,
-      firstFewInstructions: instructions.slice(0, 3),
-    });
-
-    // 2. Create the project record and log the initial Gemini interaction
-    console.log("Creating project with title:", projectTitle);
     const createdProject = await createProject(
       {
-        name: projectTitle,
-        description: requestData.projectDetails?.description || "",
+        name: projectTitle || projectName,
+        description: prompt,
       },
       user.id,
       0, // Initial total estimate is 0
@@ -92,7 +87,6 @@ async function handleEstimatorRequest(req, res) {
 
     console.log("Project created with ID:", createdProject.id);
 
-    // 3. Apply the line item changes to populate line items
     const actionSummary = await applyLineItemChanges(
       createdProject.id,
       user.id,
@@ -100,29 +94,27 @@ async function handleEstimatorRequest(req, res) {
       currency
     );
 
-    // 4. Log the user's original prompt and the actions taken
     await logPromptAndActions(
       createdProject.id,
       user.id,
-      JSON.stringify(requestData.projectDetails),
+      prompt,
       rawGeminiResponse,
       actionSummary
     );
 
-    // 5. Respond to the client with a summary
     return res.json({
       success: true,
       projectId: createdProject.id,
-      projectTitle,
+      projectTitle: projectTitle || projectName,
       currency,
       itemsAdded: actionSummary.itemsAdded,
       errors: actionSummary.errors,
-      message: `Created project "${projectTitle}" with ${actionSummary.itemsAdded} line items`,
+      message: `Created construction project "${projectTitle || projectName}" with ${actionSummary.itemsAdded} line items`,
     });
   } catch (error) {
     console.error("Error in estimator controller:", error);
     return res.status(500).json({
-      error: "Failed to generate estimate",
+      error: "Failed to generate construction estimate",
       details: error.message,
     });
   }
@@ -136,7 +128,6 @@ async function handleEstimatorRequest(req, res) {
  * @returns {Object|null} - Error object if validation fails, null if successful
  */
 function validateAdditionalPromptRequest(requestData) {
-  // Check if request data exists
   if (!requestData || Object.keys(requestData).length === 0) {
     return {
       status: 400,
@@ -144,7 +135,6 @@ function validateAdditionalPromptRequest(requestData) {
     };
   }
 
-  // Check if project ID is provided
   if (!requestData.projectId) {
     return {
       status: 400,
@@ -152,7 +142,6 @@ function validateAdditionalPromptRequest(requestData) {
     };
   }
 
-  // Check if prompt is provided
   if (!requestData.prompt) {
     return {
       status: 400,
@@ -172,7 +161,6 @@ async function handleAdditionalPrompt(req, res) {
   try {
     const requestData = req.body;
 
-    // Validate the request
     const validationError = validateAdditionalPromptRequest(requestData);
     if (validationError) {
       return res
@@ -180,25 +168,16 @@ async function handleAdditionalPrompt(req, res) {
         .json({ error: validationError.message });
     }
 
-    // Get the authenticated user from the request (added by verifyAuth middleware)
-    const user = req.user;
-
-    // 1. Get the project by ID and offset from query params
+    const user = req.user || { id: null };
     const projectId = requestData.projectId;
-    const offset = parseInt(req.query.offset) || 0;
 
-    // 2. Fetch the project
     const project = await getProjectById(projectId);
     if (!project) {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    // Verify that the user has access to this project (handled by RLS policies in Supabase)
     if (project.business_id) {
-      // 3. Fetch the current batch of line items with pagination
       const lineItems = await getProjectLineItems(projectId, offset, 300);
-
-      // 4. Generate the additional estimate using Gemini with the existing items
       const { instructions, rawGeminiResponse } =
         await generateAdditionalEstimate({
           ...requestData,
@@ -208,7 +187,6 @@ async function handleAdditionalPrompt(req, res) {
           existingItems: lineItems,
         });
 
-      // 5. Apply the line item changes
       const actionSummary = await applyLineItemChanges(
         projectId,
         user.id,
@@ -216,7 +194,6 @@ async function handleAdditionalPrompt(req, res) {
         project.currency || "USD"
       );
 
-      // 6. Log the prompt, response, and actions
       await logPromptAndActions(
         projectId,
         user.id,
@@ -225,11 +202,9 @@ async function handleAdditionalPrompt(req, res) {
         actionSummary
       );
 
-      // 7. Determine if there are more items to fetch
-      const hasMoreItems = lineItems.length === 300; // If we got the max number of items, there might be more
+      const hasMoreItems = lineItems.length === 300;
       const nextOffset = hasMoreItems ? offset + lineItems.length : null;
 
-      // Return success response with the summary of changes
       return res.json({
         success: true,
         projectId,
@@ -311,43 +286,43 @@ async function handleRangeAction(req, res) {
     let result;
 
     switch (action.toLowerCase()) {
-      case "update":
+      case "update": {
         if (!data || typeof data !== "object") {
           return res.status(400).json({
             error: "Update action requires data object with fields to update",
           });
         }
-        // Update each item in the range with the provided data
         const updatePromises = lineItems.map((item) =>
           updateLineItem(projectId, item.id, data, userId)
         );
         result = await Promise.all(updatePromises);
         break;
+      }
 
-      case "delete":
-        // Delete items in the range
+      case "delete": {
         const deletePromises = lineItems.map((item) =>
           deleteLineItem(projectId, item.id, userId)
         );
         result = await Promise.all(deletePromises);
         break;
+      }
 
-      case "duplicate":
-        // Duplicate items in the range
+      case "duplicate": {
         const duplicatePromises = lineItems.map((item) =>
           duplicateLineItem(projectId, item.id, userId)
         );
         result = await Promise.all(duplicatePromises);
-        result = result.flat(); // Flatten array of arrays
+        result = result.flat();
         break;
+      }
 
-      default:
+      default: {
         return res.status(400).json({
           error: `Unsupported action: ${action}. Supported actions are: update, delete, duplicate`,
         });
+      }
     }
 
-    // Get the updated list of line items
     const updatedItems = await getProjectLineItems(projectId);
 
     res.json({
@@ -383,7 +358,6 @@ async function handleAIGeneratedRangeAction(req, res) {
       });
     }
 
-    // Validate range format
     if (
       !range.start ||
       !range.end ||
@@ -396,7 +370,6 @@ async function handleAIGeneratedRangeAction(req, res) {
       });
     }
 
-    // Get the line items in the specified range
     const lineItems = await getProjectLineItems(
       projectId,
       range.start,
@@ -409,10 +382,8 @@ async function handleAIGeneratedRangeAction(req, res) {
       });
     }
 
-    // Analyze the prompt to determine the user's intent
     const promptLower = prompt.toLowerCase();
 
-    // Check if this is a cost_type change only
     const isCostTypeChangeOnly =
       (promptLower.includes("cost type") ||
         promptLower.includes("cost_type")) &&
@@ -423,7 +394,6 @@ async function handleAIGeneratedRangeAction(req, res) {
       !promptLower.includes("price") &&
       !promptLower.includes("quantity");
 
-    // Check if this is a unit_type change only
     const isUnitTypeChangeOnly =
       (promptLower.includes("unit type") ||
         promptLower.includes("unit_type")) &&
@@ -434,7 +404,6 @@ async function handleAIGeneratedRangeAction(req, res) {
       !promptLower.includes("price") &&
       !promptLower.includes("quantity");
 
-    // Determine the change type
     const changeType = isCostTypeChangeOnly
       ? "cost_type"
       : isUnitTypeChangeOnly
@@ -443,11 +412,8 @@ async function handleAIGeneratedRangeAction(req, res) {
 
     console.log(`Detected change type: ${changeType}`);
 
-    // If xmlResponse is provided directly, use it
-    // Otherwise, generate a response using the AI service
     let aiResponse = xmlResponse;
     if (!aiResponse) {
-      // Generate AI response based on the prompt and line items
       const itemsContext = lineItems
         .map(
           (item) =>
@@ -468,11 +434,9 @@ async function handleAIGeneratedRangeAction(req, res) {
         fullPrompt = `For the following line items:\n${itemsContext}\n\nUser request: ${prompt}\n\nPlease provide actions to modify these items. For unit_type, valid values are: hour, day, unit, package. Use the format: <estimate><actions><action>+ ID:[id], [field]=[value]</action></actions></estimate>`;
       }
 
-      // Call the AI service to generate a response
       aiResponse = await generateAdditionalEstimate(fullPrompt, projectId);
     }
 
-    // Extract actions from the XML response
     const actions = extractActionsFromXML(aiResponse);
     if (!actions || actions.length === 0) {
       return res.status(400).json({
@@ -480,19 +444,15 @@ async function handleAIGeneratedRangeAction(req, res) {
       });
     }
 
-    // Validate and normalize the actions before applying them
     const normalizedActions = validateAndNormalizeActions(actions, changeType);
     console.log("Original actions:", actions);
     console.log("Normalized actions:", normalizedActions);
-
-    // Apply the normalized actions to the line items
     const actionSummary = await applyLineItemChanges(
       projectId,
       userId,
       normalizedActions
     );
 
-    // Log the prompt and actions to the conversation history
     await logPromptAndActions(
       projectId,
       userId,
@@ -501,7 +461,6 @@ async function handleAIGeneratedRangeAction(req, res) {
       actionSummary
     );
 
-    // Get the updated list of line items
     const updatedItems = await getProjectLineItems(projectId);
 
     res.json({
@@ -686,18 +645,13 @@ function validateAndNormalizeActions(actions, changeType = "general") {
           );
         }
       } else {
-        // For regular updates, process both unit_type and cost_type
-
-        // Handle unit_type if present
         const unitTypePair = attributePairs.find((pair) =>
           pair.startsWith("unit_type=")
         );
         if (unitTypePair) {
-          // Extract the unit_type value
           let unitType = unitTypePair
             .substring(unitTypePair.indexOf("=") + 1)
             .trim();
-          // Remove quotes if present
           if (
             (unitType.startsWith("'") && unitType.endsWith("'")) ||
             (unitType.startsWith('"') && unitType.endsWith('"'))
@@ -705,7 +659,6 @@ function validateAndNormalizeActions(actions, changeType = "general") {
             unitType = unitType.substring(1, unitType.length - 1);
           }
 
-          // Validate unit_type value
           const validUnitTypes = ["hour", "day", "unit", "package"];
           if (!validUnitTypes.includes(unitType.toLowerCase())) {
             unitType = "unit"; // Default to 'unit' if invalid
@@ -714,7 +667,6 @@ function validateAndNormalizeActions(actions, changeType = "general") {
             );
           }
 
-          // Remove any existing unit_type from normalizedPairs
           const unitTypeIndex = normalizedPairs.findIndex((pair) =>
             pair.startsWith("unit_type=")
           );
@@ -722,21 +674,17 @@ function validateAndNormalizeActions(actions, changeType = "general") {
             normalizedPairs.splice(unitTypeIndex, 1);
           }
 
-          // Add the unit_type field with proper formatting
           normalizedPairs.push(`unit_type='${unitType}'`);
         }
 
-        // Determine cost_type based on description if present
         const descriptionPair = attributePairs.find((pair) =>
           pair.startsWith("description=")
         );
 
         if (descriptionPair) {
-          // Extract the description value
           let description = descriptionPair
             .substring(descriptionPair.indexOf("=") + 1)
             .trim();
-          // Remove quotes if present
           if (
             (description.startsWith("'") && description.endsWith("'")) ||
             (description.startsWith('"') && description.endsWith('"'))
@@ -746,7 +694,6 @@ function validateAndNormalizeActions(actions, changeType = "general") {
 
           description = description.toLowerCase();
 
-          // Determine cost_type based on keywords
           let costType = null;
 
           if (description.includes("admin")) {

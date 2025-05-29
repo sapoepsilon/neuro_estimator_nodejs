@@ -267,7 +267,7 @@ async function updateProjectWithEstimate(
 }
 
 /**
- * Get project line items with pagination
+ * Get project line items using the flexible schema with pagination
  * @param {number|string} projectId - The ID of the project
  * @param {number} offset - Offset for pagination (default: 0)
  * @param {number} limit - Limit for pagination (default: 300)
@@ -275,19 +275,32 @@ async function updateProjectWithEstimate(
  */
 async function getProjectLineItems(projectId, offset = 0, limit = 300) {
   try {
+    // Use the database function to get structured data
     const { data: items, error } = await supabase
-      .from("estimate_items")
-      .select("*")
-      .eq("project_id", projectId)
-      .range(offset, offset + limit - 1)
-      .order("created_at", { ascending: true });
+      .rpc('get_project_estimate_items', { project_id_param: projectId });
 
     if (error) {
       console.error("Error fetching project line items:", error);
       throw error;
     }
 
-    return items || [];
+    if (!items || items.length === 0) {
+      return [];
+    }
+
+    // Apply pagination to the results
+    const paginatedItems = items.slice(offset, offset + limit);
+    
+    // Transform the data to match expected format
+    return paginatedItems.map(item => ({
+      row_number: item.row_number,
+      ...item.item,
+      // Convert string values back to appropriate types for numeric fields
+      quantity: item.item.quantity ? parseFloat(item.item.quantity) : null,
+      unit_price: item.item.unit_price ? parseFloat(item.item.unit_price) : null,
+      amount: item.item.amount ? parseFloat(item.item.amount) : null,
+      parent_item_id: item.item.parent_item_id ? parseInt(item.item.parent_item_id) : null,
+    }));
   } catch (error) {
     console.error(
       `Error in getProjectLineItems for project ${projectId}:`,
@@ -298,10 +311,42 @@ async function getProjectLineItems(projectId, offset = 0, limit = 300) {
 }
 
 /**
- * Apply line item changes based on instructions from Gemini
+ * Update estimate item row in the new flexible schema
+ * @param {number} projectId - The project ID
+ * @param {number} rowNumber - The row number to update
+ * @param {Object} attributes - The attributes to update
+ * @param {Object} columnMap - Map of column names to column IDs
+ * @returns {Promise<void>}
+ */
+async function updateEstimateItemRow(projectId, rowNumber, attributes, columnMap) {
+  for (const [key, value] of Object.entries(attributes)) {
+    let columnName = key;
+    let columnValue = String(value);
+
+    // Map attribute names to column names
+    if (key === 'unit_price') columnName = 'unit_price';
+    else if (key === 'parent_id') columnName = 'parent_item_id';
+    else if (key === 'unit_type') columnName = 'unit_type';
+    else if (key === 'cost_type') columnName = 'cost_type';
+
+    if (columnMap[columnName]) {
+      const { error } = await supabase
+        .from('estimate_items')
+        .update({ value: columnValue })
+        .eq('project_id', projectId)
+        .eq('row_number', rowNumber)
+        .eq('column_id', columnMap[columnName]);
+
+      if (error) throw error;
+    }
+  }
+}
+
+/**
+ * Apply line item changes based on instructions from Gemini using new flexible schema
  * @param {number|string} projectId - The ID of the project
  * @param {string} userId - The ID of the authenticated user
- * @param {Array<string>} instructions - Array of instruction strings (e.g., ["+ description='Item A', quantity=10", "- ID:123"])
+ * @param {Array<string>} instructions - Array of instruction strings (e.g., ["+ description='Item A', quantity=10", "- ROW:123"])
  * @param {string} currency - Currency to use for the items (default: USD)
  * @returns {Promise<Object>} - Summary of actions performed
  */
@@ -312,6 +357,7 @@ async function applyLineItemChanges(
   currency = "USD"
 ) {
   try {
+    const columnMap = await ensureEstimateColumns(projectId);
     const summary = {
       itemsAdded: 0,
       itemsUpdated: 0,
@@ -324,114 +370,85 @@ async function applyLineItemChanges(
 
       if (!trimmedInstruction) continue;
 
-      if (trimmedInstruction.startsWith("+ ID:")) {
-        const idMatch = trimmedInstruction.match(/^\+ ID:(\d+)/);
-        if (!idMatch) {
+      if (trimmedInstruction.startsWith("+ ROW:")) {
+        // Update existing row
+        const rowMatch = trimmedInstruction.match(/^\+ ROW:(\d+)/);
+        if (!rowMatch) {
           summary.errors.push(
             `Invalid update instruction: ${trimmedInstruction}`
           );
           continue;
         }
 
-        const itemId = parseInt(idMatch[1], 10);
+        const rowNumber = parseInt(rowMatch[1], 10);
         const attributesStr = trimmedInstruction
           .substring(trimmedInstruction.indexOf(",") + 1)
           .trim();
         const attributes = parseInstructionAttributes(attributesStr);
 
-        if (
-          attributes.quantity &&
-          attributes.unit_price &&
-          !attributes.amount
-        ) {
+        if (attributes.quantity && attributes.unit_price && !attributes.amount) {
           attributes.amount = attributes.quantity * attributes.unit_price;
         }
 
-        const updateData = {};
-        for (const [key, value] of Object.entries(attributes)) {
-          if (key === "unit_price") updateData.unit_price = value;
-          else if (key === "parent_id") updateData.parent_item_id = value;
-          else if (key === "title") updateData.title = value;
-          else if (key === "unit_type") updateData.unit_type = value;
-          else if (key === "cost_type") updateData.cost_type = value;
-          else if (key === "is_sub_item") updateData.is_sub_item = value;
-          else if (key === "data") updateData.data = value;
-          else updateData[key] = value;
-        }
-        
-        // If description is being updated, determine the appropriate cost_type
         if (attributes.description && !attributes.cost_type) {
           const description = attributes.description.toLowerCase();
           
-          // Determine cost_type based on keywords in the description
           if (description.includes('admin')) {
-            updateData.cost_type = 'admin';
+            attributes.cost_type = 'admin';
           } else if (description.includes('equipment') || description.includes('tool') || 
                     description.includes('machine') || description.includes('device')) {
-            updateData.cost_type = 'equipment';
+            attributes.cost_type = 'equipment';
           } else if (description.includes('labor') || description.includes('work') || 
                     description.includes('service') || description.includes('hour') || 
                     description.includes('installation')) {
-            updateData.cost_type = 'labor';
+            attributes.cost_type = 'labor';
           } else if (description.includes('material') || description.includes('supply') || 
                     description.includes('part') || description.includes('component')) {
-            updateData.cost_type = 'material';
+            attributes.cost_type = 'material';
           } else if (description.includes('overhead') || description.includes('indirect') || 
                     description.includes('administrative')) {
-            updateData.cost_type = 'overhead';
+            attributes.cost_type = 'overhead';
           } else {
-            updateData.cost_type = 'other'; // Default to 'other' if no match
+            attributes.cost_type = 'other';
           }
-          
-          console.log(`Automatically set cost_type to '${updateData.cost_type}' based on description for item ID:${itemId}`);
         }
 
-        if (updateData.description && !updateData.title) {
-          updateData.title = updateData.description;
+        if (attributes.description && !attributes.title) {
+          attributes.title = attributes.description;
         }
 
-        const { error } = await supabase
-          .from("estimate_items")
-          .update(updateData)
-          .eq("id", itemId)
-          .eq("project_id", projectId);
+        await updateEstimateItemRow(projectId, rowNumber, attributes, columnMap);
+        summary.itemsUpdated++;
 
-        if (error) {
-          console.error("Error updating item ID:", itemId, error);
-          summary.errors.push(
-            `Error updating item ID:${itemId}: ${error.message}`
-          );
-        } else {
-          console.log("Successfully updated item ID:", itemId);
-          summary.itemsUpdated++;
-        }
-      } else if (trimmedInstruction.startsWith("- ID:")) {
-        const idMatch = trimmedInstruction.match(/^- ID:(\d+)/);
-        if (!idMatch) {
+      } else if (trimmedInstruction.startsWith("- ROW:")) {
+        // Delete row
+        const rowMatch = trimmedInstruction.match(/^- ROW:(\d+)/);
+        if (!rowMatch) {
           summary.errors.push(
             `Invalid delete instruction: ${trimmedInstruction}`
           );
           continue;
         }
 
-        const itemId = parseInt(idMatch[1], 10);
+        const rowNumber = parseInt(rowMatch[1], 10);
 
         const { error } = await supabase
           .from("estimate_items")
           .delete()
-          .eq("id", itemId)
-          .eq("project_id", projectId);
+          .eq("project_id", projectId)
+          .eq("row_number", rowNumber);
 
         if (error) {
-          console.error("Error deleting item ID:", itemId, error);
+          console.error("Error deleting row:", rowNumber, error);
           summary.errors.push(
-            `Error deleting item ID:${itemId}: ${error.message}`
+            `Error deleting row:${rowNumber}: ${error.message}`
           );
         } else {
-          console.log("Successfully deleted item ID:", itemId);
+          console.log("Successfully deleted row:", rowNumber);
           summary.itemsDeleted++;
         }
       } else if (trimmedInstruction.startsWith("+")) {
+        // Add new row
         const attributesStr = trimmedInstruction.substring(1).trim();
         const attributes = parseInstructionAttributes(attributesStr);
 
@@ -449,7 +466,6 @@ async function applyLineItemChanges(
           attributes.amount = attributes.quantity * attributes.unit_price;
         }
         
-        // Determine cost_type based on description if not explicitly provided
         let costType = attributes.cost_type;
         if (!costType && attributes.description) {
           const description = attributes.description.toLowerCase();
@@ -470,65 +486,39 @@ async function applyLineItemChanges(
                     description.includes('administrative')) {
             costType = 'overhead';
           } else {
-            costType = 'other'; // Default to 'other' if no match
+            costType = 'other';
           }
-          
-          console.log(`Automatically determined cost_type as '${costType}' based on description`);
         }
 
         const itemData = {
-          project_id: projectId,
           description: attributes.description,
           title: attributes.title || attributes.description,
           quantity: attributes.quantity,
-          unit_price: attributes.unit_price,
+          unitPrice: attributes.unit_price,
           amount: attributes.amount,
           currency: currency,
-          created_by: userId,
-          unit_type: attributes.unit_type || "unit",
-          cost_type: costType || "material", // Use determined cost_type or default to material
-          is_sub_item: attributes.is_sub_item || false,
+          unitType: attributes.unit_type || "unit",
+          costType: costType || "material",
           status: attributes.status || "active",
-          // Store any extra data as JSON
-          data: attributes.data || {
-            ai_generated: true,
-            generation_timestamp: new Date().toISOString(),
-          },
+          parent_item_id: attributes.parent_id || null,
         };
 
-        if (attributes.parent) {
-          const { data: parentItems, error: parentError } = await supabase
-            .from("estimate_items")
-            .select("id")
-            .eq("project_id", projectId)
-            .eq("description", attributes.parent)
-            .limit(1);
+        // Get next row number
+        const { data: maxRowData } = await supabase
+          .from('estimate_items')
+          .select('row_number')
+          .eq('project_id', projectId)
+          .order('row_number', { ascending: false })
+          .limit(1);
 
-          if (parentError || !parentItems || parentItems.length === 0) {
-            summary.errors.push(
-              `Could not find parent item: ${attributes.parent}`
-            );
-          } else {
-            itemData.parent_item_id = parentItems[0].id;
-            itemData.is_sub_item = true;
-          }
-        } else if (attributes.parent_id) {
-          itemData.parent_item_id = attributes.parent_id;
-          itemData.is_sub_item = true;
+        let nextRowNumber = 1;
+        if (maxRowData && maxRowData.length > 0) {
+          nextRowNumber = maxRowData[0].row_number + 1;
         }
 
-        const { data: newItem, error } = await supabase
-          .from("estimate_items")
-          .insert(itemData)
-          .select();
+        await insertEstimateItemRow(projectId, nextRowNumber, itemData, columnMap);
+        summary.itemsAdded++;
 
-        if (error) {
-          console.error("Error adding new item:", error);
-          summary.errors.push(`Error adding new item: ${error.message}`);
-        } else {
-          console.log("Successfully added new item:", newItem);
-          summary.itemsAdded++;
-        }
       } else {
         summary.errors.push(
           `Unknown instruction format: ${trimmedInstruction}`
@@ -647,96 +637,189 @@ async function logPromptAndActions(
 }
 
 /**
- * Create estimate items for a project
+ * Ensure estimate columns exist for a project
+ * @param {number} projectId - The project ID
+ * @returns {Promise<Object>} - Map of column names to column IDs
+ */
+async function ensureEstimateColumns(projectId) {
+  const defaultColumns = [
+    { name: 'title', type: 'text', required: true, position: 1 },
+    { name: 'description', type: 'text', required: false, position: 2 },
+    { name: 'quantity', type: 'numeric', required: false, position: 3 },
+    { name: 'unit_type', type: 'text', required: false, position: 4 },
+    { name: 'unit_price', type: 'numeric', required: false, position: 5 },
+    { name: 'amount', type: 'numeric', required: false, position: 6 },
+    { name: 'cost_type', type: 'text', required: false, position: 7 },
+    { name: 'status', type: 'text', required: false, position: 8 },
+    { name: 'currency', type: 'text', required: false, position: 9 },
+    { name: 'parent_item_id', type: 'numeric', required: false, position: 10 },
+    { name: 'data', type: 'jsonb', required: false, position: 11 }
+  ];
+
+  const { data: existingColumns, error: fetchError } = await supabase
+    .from('estimate_columns')
+    .select('id, column_name')
+    .eq('project_id', projectId);
+
+  if (fetchError) throw fetchError;
+
+  const existingColumnMap = {};
+  if (existingColumns) {
+    existingColumns.forEach(col => {
+      existingColumnMap[col.column_name] = col.id;
+    });
+  }
+
+  const missingColumns = defaultColumns.filter(col => !existingColumnMap[col.name]);
+
+  if (missingColumns.length > 0) {
+    const columnsToInsert = missingColumns.map(col => ({
+      project_id: projectId,
+      column_name: col.name,
+      data_type: col.type,
+      is_required: col.required,
+      position: col.position
+    }));
+
+    const { data: newColumns, error: insertError } = await supabase
+      .from('estimate_columns')
+      .insert(columnsToInsert)
+      .select('id, column_name');
+
+    if (insertError) throw insertError;
+
+    newColumns.forEach(col => {
+      existingColumnMap[col.column_name] = col.id;
+    });
+  }
+
+  return existingColumnMap;
+}
+
+/**
+ * Insert estimate item row with flexible columns
+ * @param {number} projectId - The project ID
+ * @param {number} rowNumber - The row number for this item
+ * @param {Object} itemData - The item data to insert
+ * @param {Object} columnMap - Map of column names to column IDs
+ * @returns {Promise<void>}
+ */
+async function insertEstimateItemRow(projectId, rowNumber, itemData, columnMap) {
+  const itemValues = [];
+
+  for (const [columnName, columnId] of Object.entries(columnMap)) {
+    let value = null;
+
+    switch (columnName) {
+      case 'title':
+        // Generate a concise title from description (first 50 chars)
+        const desc = itemData.description || itemData.title || "Unnamed Item";
+        value = desc.length > 50 ? desc.substring(0, 50).trim() + "..." : desc;
+        break;
+      case 'description':
+        value = itemData.details || itemData.description || "";
+        break;
+      case 'quantity':
+        value = itemData.quantity ? String(parseFloat(itemData.quantity)) : null;
+        break;
+      case 'unit_type':
+        value = itemData.unitType || "unit";
+        break;
+      case 'unit_price':
+        value = itemData.unitPrice ? String(parseFloat(itemData.unitPrice)) : null;
+        break;
+      case 'amount':
+        value = itemData.amount ? String(parseFloat(itemData.amount)) : null;
+        break;
+      case 'cost_type':
+        value = itemData.costType || "material";
+        break;
+      case 'status':
+        value = itemData.status || "draft";
+        break;
+      case 'currency':
+        value = itemData.currency || "USD";
+        break;
+      case 'parent_item_id':
+        value = itemData.parent_item_id ? String(itemData.parent_item_id) : null;
+        break;
+      case 'data':
+        value = JSON.stringify({
+          original_item: itemData,
+          ai_generated: true,
+          generation_timestamp: new Date().toISOString(),
+          confidence_score: itemData.confidenceScore || 0.9,
+          notes: itemData.notes || "",
+          tags: itemData.tags || [],
+        });
+        break;
+    }
+
+    if (value !== null) {
+      itemValues.push({
+        project_id: projectId,
+        row_number: rowNumber,
+        column_id: columnId,
+        value: value
+      });
+    }
+  }
+
+  if (itemValues.length > 0) {
+    const { error } = await supabase
+      .from('estimate_items')
+      .insert(itemValues);
+
+    if (error) throw error;
+  }
+}
+
+/**
+ * Create estimate items for a project using the new flexible schema
  * @param {number} projectId - The ID of the project
  * @param {Array} estimateItems - Array of estimate items
  * @param {string} userId - The ID of the user
- * @returns {Promise<Array>} - The created estimate items
+ * @returns {Promise<Array>} - Array of created row numbers
  */
 async function createEstimateItems(projectId, estimateItems, userId) {
   try {
-    // First, insert all top-level items and get their IDs
-    const topLevelItems = estimateItems.map((item) => ({
-      project_id: projectId,
-      title: item.description || item.title || "Unnamed Item",
-      description: item.details || "",
-      quantity: parseFloat(item.quantity || 0),
-      unit_price: parseFloat(item.unitPrice || 0),
-      unit_type: item.unitType || "unit",
-      cost_type: item.costType || "material",
-      amount: parseFloat(item.amount || 0),
-      currency: item.currency || "USD",
-      total_amount: parseFloat(item.totalAmount || item.amount || 0),
-      status: "draft",
-      parent_item_id: null,
-      created_by: userId,
-      is_sub_item: false,
-      data: {
-        original_item: item,
-        ai_generated: true,
-        generation_timestamp: new Date().toISOString(),
-        confidence_score: item.confidenceScore || 0.9, // Default high confidence if not provided
-        notes: item.notes || "",
-        tags: item.tags || [],
-      },
-    }));
+    const columnMap = await ensureEstimateColumns(projectId);
+    const createdRows = [];
+    let currentRowNumber = 1;
 
-    const { data: createdTopLevelItems, error: topLevelError } = await supabase
-      .from("estimate_items")
-      .insert(topLevelItems)
-      .select();
+    // Get the highest existing row number
+    const { data: maxRowData, error: maxRowError } = await supabase
+      .from('estimate_items')
+      .select('row_number')
+      .eq('project_id', projectId)
+      .order('row_number', { ascending: false })
+      .limit(1);
 
-    if (topLevelError) {
-      throw topLevelError;
+    if (!maxRowError && maxRowData && maxRowData.length > 0) {
+      currentRowNumber = maxRowData[0].row_number + 1;
     }
 
-    // Now process sub-items with the correct parent IDs
-    const allSubItems = [];
+    for (const item of estimateItems) {
+      await insertEstimateItemRow(projectId, currentRowNumber, item, columnMap);
+      createdRows.push(currentRowNumber);
 
-    // Make sure createdTopLevelItems exists and has items before processing sub-items
-    if (createdTopLevelItems && createdTopLevelItems.length > 0) {
-      for (
-        let i = 0;
-        i < Math.min(estimateItems.length, createdTopLevelItems.length);
-        i++
-      ) {
-        const item = estimateItems[i];
-        const parentItem = createdTopLevelItems[i];
-
-        if (
-          item &&
-          parentItem &&
-          parentItem.id &&
-          item.subItems &&
-          Array.isArray(item.subItems) &&
-          item.subItems.length > 0
-        ) {
-          // Process sub-items recursively
-          await processSubItems(
-            item.subItems,
-            parentItem.id,
-            projectId,
-            userId,
-            allSubItems
-          );
+      // Process sub-items if they exist
+      if (item.subItems && Array.isArray(item.subItems)) {
+        for (const subItem of item.subItems) {
+          currentRowNumber++;
+          const subItemWithParent = {
+            ...subItem,
+            parent_item_id: currentRowNumber - 1 // Reference to parent row
+          };
+          await insertEstimateItemRow(projectId, currentRowNumber, subItemWithParent, columnMap);
+          createdRows.push(currentRowNumber);
         }
       }
+
+      currentRowNumber++;
     }
 
-    if (allSubItems.length > 0) {
-      const { data: createdSubItems, error: subItemsError } = await supabase
-        .from("estimate_items")
-        .insert(allSubItems)
-        .select();
-
-      if (subItemsError) {
-        throw subItemsError;
-      }
-
-      return [...createdTopLevelItems, ...createdSubItems];
-    }
-
-    return createdTopLevelItems;
+    return createdRows;
   } catch (error) {
     console.error("Error creating estimate items:", error);
     throw error;

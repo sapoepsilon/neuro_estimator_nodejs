@@ -1,10 +1,8 @@
 import { getModel } from "../aimodel/aiClient.js";
 import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
-import { supabase } from "./supabaseService.js";
 import { XMLParser } from "fast-xml-parser";
 import {
   GoogleGenAI,
-  FunctionCallingConfigMode,
   mcpToTool,
 } from "@google/genai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -18,35 +16,55 @@ function getEstimatorModel() {
 }
 
 /**
- * Prepare the prompt for the estimator agent
+ * Prepare the prompt for the construction estimator agent
  * @param {Object} requestData - The data from the request
- * @param {Object} [requestData.projectDetails] - Details about the project
+ * @param {string} requestData.prompt - The construction project description
  * @returns {string} - The formatted prompt
  */
 function prepareEstimatorPrompt(requestData) {
-  // Extract project details from request
-  const { projectDetails } = requestData;
+  const { prompt } = requestData;
 
   return `
-    You are an estimator agent. Based on the following request, create a detailed line item estimate.
+    You are a professional construction estimator. Based on the following construction project description, create a detailed line item estimate with proper construction trades and categories.
     
-    Request details:
-    ${JSON.stringify(projectDetails || requestData, null, 2)}
+    Construction Project: ${prompt}
+    
+    Generate a comprehensive construction estimate that includes:
+    - Foundation work (excavation, concrete, rebar)
+    - Framing (lumber, fasteners, labor)
+    - Electrical (wiring, outlets, fixtures, labor)
+    - Plumbing (pipes, fixtures, labor)
+    - HVAC (equipment, ductwork, labor)
+    - Insulation and drywall
+    - Flooring and finishes
+    - Roofing materials and labor
+    - Exterior work (siding, windows, doors)
+    - Any other relevant construction items
+
+    Use appropriate construction cost types:
+    - material: Raw materials and supplies
+    - labor: Worker time and installation
+    - equipment: Tool rental, machinery
+    - overhead: Project management, permits, insurance
     
     IMPORTANT: Your response MUST be in XML format with the following structure:
     <estimate>
-      <project_title>Title of the estimate</project_title>
+      <project_title>Brief descriptive title of the construction project</project_title>
       <currency>USD</currency>
       <actions>
-        <action>+ description='Description of item', quantity=1, unit_price=100, amount=100</action>
-        <action>+ description='Another item with sub-items', quantity=1, unit_price=200, amount=200</action>
-        <action>+ description='Sub-item 1', quantity=2, unit_price=50, amount=100, parent='Another item with sub-items'</action>
+        <action>+ description='Site Preparation and Excavation', quantity=1, unit_price=3500, amount=3500, cost_type='labor', unit_type='package'</action>
+        <action>+ description='Concrete Foundation', quantity=150, unit_price=12, amount=1800, cost_type='material', unit_type='unit'</action>
+        <action>+ description='Foundation Labor', quantity=16, unit_price=75, amount=1200, cost_type='labor', unit_type='hour'</action>
+        <action>+ description='Framing Materials', quantity=1, unit_price=8500, amount=8500, cost_type='material', unit_type='package'</action>
+        <action>+ description='Framing Labor', quantity=80, unit_price=65, amount=5200, cost_type='labor', unit_type='hour'</action>
       </actions>
     </estimate>
     
     Each <action> tag must start with a '+' character followed by a space, then a comma-separated list of attributes.
-    The attributes should include: description, quantity, unit_price, and amount.
-    For sub-items, include a parent attribute that matches the description of the parent item.
+    Required attributes: description, quantity, unit_price, amount, cost_type, unit_type
+    Valid cost_type values: material, labor, equipment, overhead
+    Valid unit_type values: hour, day, unit, package
+    
     Do not include any other text, explanations, or formatting outside of this XML structure.
   `;
 }
@@ -172,6 +190,8 @@ function processGeminiResponse(responseText) {
   }
 }
 
+// TODO: A user should be able to select which model to use, and we should be able to switch between models
+// TODO: I guess this should be renamed to generateWithGemini
 /**
  * Generate an estimate using Gemini Flash 002
  * @param {Object} requestData - The data to generate an estimate for
@@ -186,7 +206,7 @@ async function generateEstimate(requestData) {
         "@playwright/mcp@latest",
         "--no-sandbox",
         "--user-data-dir=/Users/ismatullamansurov/Library/Caches/ms-playwright/chromium-1148",
-      ], // MCP Server
+      ],
     });
 
     const playwrightMcpClient = new Client({
@@ -209,18 +229,15 @@ async function generateEstimate(requestData) {
 
     const responseText = result.candidates[0].content.parts[0].text;
 
-    // Store the raw response text for debugging/logging
     const rawGeminiResponse = {
       text: responseText,
       timestamp: new Date().toISOString(),
       prompt: prompt,
     };
 
-    // Process and validate the response
     const { projectTitle, currency, instructions } =
       processGeminiResponse(responseText);
 
-    // Return the structured data
     return {
       projectTitle,
       currency,

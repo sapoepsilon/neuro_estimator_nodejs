@@ -1,10 +1,28 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { access, constants } from 'fs/promises';
 import estimatorRoutes from "./routes/estimatorRoutes.js";
 
-dotenv.config();
+// Configure dotenv before any other code runs
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
+// Load environment variables from .env file if it exists
+try {
+  const envPath = join(__dirname, '.env');
+  await access(envPath, constants.F_OK);
+  dotenv.config({ path: envPath });
+  console.log('Environment variables loaded from .env file');
+} catch {
+  console.warn('Warning: .env file not found. Using default environment variables.');
+  // Load default environment variables
+  dotenv.config();
+}
+
+// Now we can safely use process.env
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -41,7 +59,7 @@ app.get("/health", (req, res) => {
 
 app.use("/api", estimatorRoutes);
 
-app.use((err, req, res, next) => {
+app.use((err, req, res) => {
   console.error(err.stack);
   res.status(500).json({
     error: "Something went wrong!",

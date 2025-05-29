@@ -1,0 +1,63 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "postgresql": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+      ],
+      "env": {}
+    },
+    "iterm-mcp": {
+      "command": "npx",
+      "args": ["iterm-mcp"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/ismatullamansurov/Developer",
+        "/Users/ismatullamansurov/Documents",
+        "/Users/ismatullamansurov/Downloads"
+      ]
+    },
+    "desktop-commander": {
+      "command": "npx",
+      "args": ["@wonderwhy-er/desktop-commander@latest"]
+    },
+    "todoist": {
+      "command": "npx",
+      "args": ["-y", "@abhiz123/todoist-mcp-server"],
+      "env": {
+        "TODOIST_API_TOKEN": "cfe0c7a0e03dd40618dbe3053b868f383918dedd"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--no-sandbox",
+        "--user-data-dir=/Users/ismatullamansurov/Library/Caches/ms-playwright/chromium-1148"
+      ]
+    },
+    "linear": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.linear.app/sse"]
+    },
+    "server-gmail-autoauth-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@gongrzhe/server-gmail-autoauth-mcp"
+      ]
+    }
+  }
+}
