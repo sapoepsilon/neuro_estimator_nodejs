@@ -6,6 +6,7 @@ import { dirname, join } from 'path';
 import { access, constants } from 'fs/promises';
 import estimatorRoutes from "./routes/estimatorRoutes.js";
 import streamingRoutes from "./routes/streamingRoutes.js";
+import aiStreamingRoutes from "./routes/aiStreamingRoutes.js";
 import { connectionManager } from "./services/connectionManager.js";
 
 // Configure dotenv before any other code runs
@@ -61,6 +62,7 @@ app.get("/health", (req, res) => {
 
 app.use("/api", estimatorRoutes);
 app.use("/api/stream", streamingRoutes);
+app.use("/", aiStreamingRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err.stack);

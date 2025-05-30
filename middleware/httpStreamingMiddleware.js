@@ -17,12 +17,15 @@ export function httpStreamingMiddleware(req, res, next) {
       // Write JSON data followed by newline
       const line = JSON.stringify(data) + '\n';
       res.write(line);
+      // Force flush if available (for compression middleware)
+      if (res.flush) res.flush();
       return line.length;
     },
     
     writeHeartbeat: () => {
       // Send empty line as heartbeat
       res.write('\n');
+      if (res.flush) res.flush();
     },
     
     end: (finalData = null) => {
