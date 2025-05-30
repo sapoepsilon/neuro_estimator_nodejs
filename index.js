@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { access, constants } from 'fs/promises';
 import estimatorRoutes from "./routes/estimatorRoutes.js";
+import streamingRoutes from "./routes/streamingRoutes.js";
+import { connectionManager } from "./services/connectionManager.js";
 
 // Configure dotenv before any other code runs
 const __filename = fileURLToPath(import.meta.url);
@@ -58,8 +60,9 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api", estimatorRoutes);
+app.use("/api/stream", streamingRoutes);
 
-app.use((err, req, res) => {
+app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
     error: "Something went wrong!",
@@ -74,7 +77,40 @@ app.use((req, res) => {
   });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
+});
+
+// Graceful shutdown handling
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing HTTP streaming connections...');
+  
+  // Close all active streaming connections
+  await connectionManager.closeAll();
+  
+  // Close the server
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+  
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.error('Forced exit after timeout');
+    process.exit(1);
+  }, 10000);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, closing HTTP streaming connections...');
+  
+  // Close all active streaming connections
+  await connectionManager.closeAll();
+  
+  // Close the server
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });
