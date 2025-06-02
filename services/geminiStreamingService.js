@@ -378,4 +378,181 @@ Ensure all numeric values are actual numbers, not strings.`;
     
     return 'UNKNOWN_ERROR';
   }
+
+  /**
+   * Generate additional estimate stream for existing projects
+   * @param {Object} params - Generation parameters
+   * @returns {AsyncGenerator} Stream of events
+   */
+  async *generateAdditionalEstimateStream({ prompt, existingProject, existingItems = [], userId }) {
+    try {
+      // Yield start event
+      yield {
+        type: 'progress',
+        message: 'Preparing context for AI...',
+        stage: 'preparation'
+      };
+
+      // Format existing items for context
+      const formattedItems = existingItems
+        .slice(0, 300) // Limit to first 300 items for context
+        .map((item) => {
+          return `ID:${item.id}, description='${item.description}', quantity=${
+            item.quantity
+          }, unit_price=${item.unitPrice}, amount=${item.amount}${
+            item.parentId ? `, parent_id=${item.parentId}` : ""
+          }`;
+        })
+        .join("\n");
+
+      const additionalPrompt = `
+        You are an estimator agent. You have access to a web browser tool to test the prices if the user requests it. You have previously created an estimate for a project titled "${
+          existingProject.name || "Untitled Project"
+        }". 
+        Now you need to modify the estimate based on the following additional request.
+        
+        Current line items (showing first 300):
+        ${formattedItems || "No existing items"}
+        ${existingItems.length > 300 ? `\n... and ${existingItems.length - 300} more items` : ''}
+        
+        Additional request from the user:
+        ${prompt}
+        
+        IMPORTANT: Your response MUST be in XML format with the following structure:
+        <estimate>
+          <actions>
+            <action>+ description='New item description', quantity=1, unit_price=100, amount=100</action>
+            <action>+ ID:123, description='Updated item description', quantity=2, unit_price=150, amount=300</action>
+            <action>- ID:456</action>
+          </actions>
+        </estimate>
+        
+        Each <action> tag must contain one of the following:
+        1. For adding new items: Start with '+' followed by attributes (description, quantity, unit_price, amount)
+        2. For updating existing items: Start with '+' followed by the item ID and the attributes to update
+        3. For deleting items: Start with '-' followed by the item ID
+        4. We now support tools to browse internet. If you notice that there is a link we should use the playwright tool to browse the internet
+           a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter
+        
+        Do not include any other text, explanations, or formatting outside of this XML structure.
+      `;
+
+      yield {
+        type: 'progress',
+        message: 'Sending request to AI model...',
+        stage: 'request',
+        contextSize: existingItems.length
+      };
+
+      // Set up MCP tools if needed
+      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+      const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+      const { GoogleGenAI, mcpToTool } = await import("@google/genai");
+      
+      // Initialize Playwright MCP client
+      const playwright = new StdioClientTransport({
+        command: "npx",
+        args: ["-y", "@playwright/mcp@latest", "--no-sandbox"],
+      });
+
+      const playwrightMcpClient = new Client({
+        name: "Playwright",
+        version: "1.0.0",
+      });
+
+      await playwrightMcpClient.connect(playwright);
+
+      // Initialize Gemini with MCP tools
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      
+      // Generate content stream
+      const response = await ai.models.generateContentStream({
+        model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
+        contents: additionalPrompt,
+        config: {
+          tools: [mcpToTool(playwrightMcpClient)],
+        },
+      });
+
+      let accumulatedText = '';
+      let chunkCount = 0;
+      let mcpCallCount = 0;
+
+      // Process the stream
+      for await (const chunk of response) {
+        const chunkText = chunk.text;
+        if (!chunkText) continue;
+        
+        accumulatedText += chunkText;
+        chunkCount++;
+
+        // Check for MCP tool calls in chunk
+        if (chunk.functionCalls) {
+          mcpCallCount++;
+          yield {
+            type: 'mcp_action',
+            tool: 'playwright',
+            callNumber: mcpCallCount,
+            message: 'AI is browsing the web...'
+          };
+        }
+        
+        // Yield chunk event
+        yield {
+          type: 'chunk',
+          content: chunkText,
+          chunkNumber: chunkCount,
+          totalLength: accumulatedText.length
+        };
+        
+        // Yield progress
+        yield {
+          type: 'progress',
+          message: `Receiving AI response...`,
+          chunkCount,
+          accumulatedLength: accumulatedText.length,
+          stage: 'streaming'
+        };
+      }
+
+      // Process complete response
+      yield {
+        type: 'ai_complete',
+        message: 'AI generation complete, processing response'
+      };
+
+      // Parse XML response
+      const processedResponse = this.processXMLResponse(accumulatedText);
+      
+      // Clean up MCP client
+      await playwrightMcpClient.close();
+
+      // Yield complete event with instructions
+      yield {
+        type: 'complete',
+        data: {
+          instructions: processedResponse.instructions || [],
+          rawResponse: {
+            text: accumulatedText,
+            timestamp: new Date().toISOString(),
+            prompt: additionalPrompt
+          }
+        }
+      };
+
+    } catch (error) {
+      console.error('Additional estimate streaming error:', error);
+      
+      // Classify and yield error
+      const errorType = this.classifyError(error);
+      yield {
+        type: 'error',
+        error: error.message,
+        code: errorType,
+        details: error.stack
+      };
+      
+      throw error;
+    }
+  }
 }

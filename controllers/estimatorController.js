@@ -820,4 +820,337 @@ async function duplicateLineItem(projectId, itemId, userId) {
   return newItem[0];
 }
 
-export { handleEstimatorRequest, handleAdditionalPrompt, handleRangeAction };
+/**
+ * Handle additional prompt requests with streaming support
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object (with streaming helpers)
+ */
+async function handleAdditionalPromptStream(req, res) {
+  try {
+    const requestData = req.body;
+
+    const validationError = validateAdditionalPromptRequest(requestData);
+    if (validationError) {
+      res.stream.write({
+        type: 'error',
+        error: validationError.message,
+        code: 'VALIDATION_ERROR'
+      });
+      res.stream.end();
+      return;
+    }
+
+    const user = req.user || { id: null };
+    const projectId = requestData.projectId;
+
+    // Stream project loading
+    res.stream.write({
+      type: 'fetch_start',
+      message: 'Loading project data...'
+    });
+
+    const project = await getProjectById(projectId);
+    if (!project) {
+      res.stream.write({
+        type: 'error',
+        error: 'Project not found',
+        code: 'PROJECT_NOT_FOUND'
+      });
+      res.stream.end();
+      return;
+    }
+
+    if (!project.business_id) {
+      res.stream.write({
+        type: 'error',
+        error: 'You do not have access to this project',
+        code: 'ACCESS_DENIED'
+      });
+      res.stream.end();
+      return;
+    }
+
+    // Fetch line items
+    const lineItems = await getProjectLineItems(projectId);
+    
+    res.stream.write({
+      type: 'project_loaded',
+      projectId,
+      projectName: project.name,
+      itemCount: lineItems.length,
+      message: `Loaded ${lineItems.length} existing items`
+    });
+
+    // Import streaming service dynamically
+    const { GeminiStreamingService } = await import('../services/geminiStreamingService.js');
+    const streamingService = new GeminiStreamingService();
+
+    // Stream AI generation
+    res.stream.write({
+      type: 'ai_start',
+      message: 'Processing your request with AI...'
+    });
+
+    let instructions = [];
+    let rawGeminiResponse = null;
+
+    // Generate additional estimate with streaming
+    for await (const event of streamingService.generateAdditionalEstimateStream({
+      prompt: requestData.prompt,
+      existingProject: project,
+      existingItems: lineItems,
+      userId: user.id
+    })) {
+      // Forward AI events to client
+      res.stream.write(event);
+      
+      // Capture complete data
+      if (event.type === 'complete') {
+        instructions = event.data.instructions || [];
+        rawGeminiResponse = event.data.rawResponse;
+      }
+      
+      // Force flush for immediate delivery
+      if (res.flush) res.flush();
+    }
+
+    // Apply line item changes with progress
+    if (instructions.length > 0) {
+      res.stream.write({
+        type: 'apply_start',
+        totalInstructions: instructions.length,
+        message: `Applying ${instructions.length} changes...`
+      });
+
+      const { applyLineItemChangesWithProgress } = await import('../services/streamProjectService.js');
+      
+      const actionSummary = await applyLineItemChangesWithProgress(
+        projectId,
+        user.id,
+        instructions,
+        project.currency || 'USD',
+        (progress) => {
+          res.stream.write({
+            type: 'apply_progress',
+            ...progress
+          });
+        }
+      );
+
+      // Log the operation
+      await logPromptAndActions(
+        projectId,
+        user.id,
+        requestData.prompt,
+        rawGeminiResponse,
+        actionSummary
+      );
+
+      res.stream.write({
+        type: 'complete',
+        projectId,
+        actionSummary,
+        message: `Applied ${actionSummary.itemsAdded + actionSummary.itemsUpdated + actionSummary.itemsDeleted} changes to the project`
+      });
+    } else {
+      res.stream.write({
+        type: 'complete',
+        projectId,
+        message: 'No changes needed based on your request'
+      });
+    }
+
+  } catch (error) {
+    console.error("Error in additional prompt streaming:", error);
+    res.stream.write({
+      type: 'error',
+      error: error.message,
+      code: 'STREAM_ERROR'
+    });
+  } finally {
+    res.stream.end();
+  }
+}
+
+/**
+ * Handle range action requests with streaming support
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object (with streaming helpers)
+ */
+async function handleRangeActionStream(req, res) {
+  try {
+    const { projectId, range, action, updates } = req.body;
+    const userId = req.user.id;
+
+    // Validate inputs
+    if (!projectId || !range || !action) {
+      res.stream.write({
+        type: 'error',
+        error: 'Missing required fields: projectId, range, and action are required',
+        code: 'VALIDATION_ERROR'
+      });
+      res.stream.end();
+      return;
+    }
+
+    res.stream.write({
+      type: 'range_start',
+      action,
+      range,
+      message: `Starting ${action} operation on items ${range.start} to ${range.end}`
+    });
+
+    // Get line items in the specified range
+    const lineItems = await getProjectLineItems(
+      projectId,
+      range.start,
+      range.end - range.start + 1
+    );
+
+    if (!lineItems || lineItems.length === 0) {
+      res.stream.write({
+        type: 'error',
+        error: 'No line items found in the specified range',
+        code: 'NO_ITEMS_FOUND'
+      });
+      res.stream.end();
+      return;
+    }
+
+    res.stream.write({
+      type: 'items_loaded',
+      count: lineItems.length,
+      message: `Found ${lineItems.length} items to ${action}`
+    });
+
+    let result = [];
+    let processed = 0;
+
+    // Process each item with streaming updates
+    switch (action) {
+      case "update": {
+        for (const item of lineItems) {
+          try {
+            const updatedItem = await updateLineItem(projectId, item.id, updates, userId);
+            result.push(updatedItem);
+            processed++;
+            
+            res.stream.write({
+              type: 'item_processed',
+              itemId: item.id,
+              index: processed,
+              total: lineItems.length,
+              status: 'success',
+              description: item.description
+            });
+          } catch (error) {
+            res.stream.write({
+              type: 'item_error',
+              itemId: item.id,
+              error: error.message,
+              description: item.description
+            });
+          }
+        }
+        break;
+      }
+
+      case "delete": {
+        for (const item of lineItems) {
+          try {
+            await deleteLineItem(projectId, item.id, userId);
+            result.push(item);
+            processed++;
+            
+            res.stream.write({
+              type: 'item_processed',
+              itemId: item.id,
+              index: processed,
+              total: lineItems.length,
+              status: 'deleted',
+              description: item.description
+            });
+          } catch (error) {
+            res.stream.write({
+              type: 'item_error',
+              itemId: item.id,
+              error: error.message,
+              description: item.description
+            });
+          }
+        }
+        break;
+      }
+
+      case "duplicate": {
+        for (const item of lineItems) {
+          try {
+            const duplicated = await duplicateLineItem(projectId, item.id, userId);
+            result.push(...duplicated);
+            processed++;
+            
+            res.stream.write({
+              type: 'item_processed',
+              itemId: item.id,
+              index: processed,
+              total: lineItems.length,
+              status: 'duplicated',
+              newItemId: duplicated[0]?.id,
+              description: item.description
+            });
+          } catch (error) {
+            res.stream.write({
+              type: 'item_error',
+              itemId: item.id,
+              error: error.message,
+              description: item.description
+            });
+          }
+        }
+        result = result.flat();
+        break;
+      }
+
+      default: {
+        res.stream.write({
+          type: 'error',
+          error: `Unsupported action: ${action}. Supported actions are: update, delete, duplicate`,
+          code: 'UNSUPPORTED_ACTION'
+        });
+        res.stream.end();
+        return;
+      }
+    }
+
+    // Get updated items
+    const updatedItems = await getProjectLineItems(projectId);
+
+    res.stream.write({
+      type: 'complete',
+      action,
+      range,
+      affectedCount: result.length,
+      processedCount: processed,
+      totalItems: updatedItems.length,
+      message: `Successfully ${action}d ${processed} items`
+    });
+
+  } catch (error) {
+    console.error("Error in range action streaming:", error);
+    res.stream.write({
+      type: 'error',
+      error: error.message,
+      code: 'STREAM_ERROR'
+    });
+  } finally {
+    res.stream.end();
+  }
+}
+
+export { 
+  handleEstimatorRequest, 
+  handleAdditionalPrompt, 
+  handleRangeAction,
+  handleAdditionalPromptStream,
+  handleRangeActionStream
+};
