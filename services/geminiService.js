@@ -1,10 +1,7 @@
 import { getModel } from "../aimodel/aiClient.js";
 import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
 import { XMLParser } from "fast-xml-parser";
-import {
-  GoogleGenAI,
-  mcpToTool,
-} from "@google/genai";
+import { GoogleGenAI, mcpToTool } from "@google/genai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 /**
@@ -19,13 +16,19 @@ function getEstimatorModel() {
  * Prepare the prompt for the construction estimator agent
  * @param {Object} requestData - The data from the request
  * @param {string} requestData.prompt - The construction project description
+ * @param {boolean} requestData.should_use_web - Whether to use web browsing tools
  * @returns {string} - The formatted prompt
  */
 function prepareEstimatorPrompt(requestData) {
-  const { prompt } = requestData;
+  const { prompt, should_use_web = false } = requestData;
 
   return `
     You are a professional construction estimator. Based on the following construction project description, create a detailed line item estimate with proper construction trades and categories.
+    ${
+      should_use_web
+        ? "\nYou have access to a web browser tool to research current material prices if needed."
+        : ""
+    }
     
     Construction Project: ${prompt}
     
@@ -75,11 +78,17 @@ function prepareEstimatorPrompt(requestData) {
  * @param {string} requestData.prompt - The additional prompt to process
  * @param {Object} requestData.existingProject - The existing project data
  * @param {Array} requestData.existingItems - Existing line items for the project (up to 300)
+ * @param {boolean} requestData.should_use_web - Whether to use web browsing tools
  * @returns {string} - The formatted prompt
  */
 function prepareAdditionalEstimatorPrompt(requestData) {
   // Extract data from the request
-  const { prompt, existingProject, existingItems = [] } = requestData;
+  const {
+    prompt,
+    existingProject,
+    existingItems = [],
+    should_use_web = false,
+  } = requestData;
 
   // Format existing items for context
   const formattedItems = existingItems
@@ -93,9 +102,13 @@ function prepareAdditionalEstimatorPrompt(requestData) {
     .join("\n");
 
   return `
-    You are an estimator agent. You have access to a web browser tool to test the prices if the user requests it. You have previously created an estimate for a project titled "${
-      existingProject.name || "Untitled Project"
-    }". 
+    You are an estimator agent. ${
+      should_use_web
+        ? "You have access to a web browser tool to test the prices if the user requests it."
+        : ""
+    } You have previously created an estimate for a project titled "${
+    existingProject.name || "Untitled Project"
+  }". 
     Now you need to modify the estimate based on the following additional request.
     
     Current line items:
@@ -116,9 +129,13 @@ function prepareAdditionalEstimatorPrompt(requestData) {
     Each <action> tag must contain one of the following:
     1. For adding new items: Start with '+' followed by attributes (description, quantity, unit_price, amount)
     2. For updating existing items: Start with '+' followed by the item ID and the attributes to update
-    3. For deleting items: Start with '-' followed by the item ID
+    3. For deleting items: Start with '-' followed by the item ID${
+      should_use_web
+        ? `
     4. We now support tools to browse internet. If you notice that there is a link we should use the playwright tool to browse the internet
-       a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter
+       a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter`
+        : ""
+    }
     
     Do not include any other text, explanations, or formatting outside of this XML structure.
   `;
@@ -199,35 +216,62 @@ function processGeminiResponse(responseText) {
  */
 async function generateEstimate(requestData) {
   try {
-    const playwright = new StdioClientTransport({
-      command: "npx",
-      args: [
-        "-y",
-        "@playwright/mcp@latest",
-        "--no-sandbox",
-        "--user-data-dir=/Users/ismatullamansurov/Library/Caches/ms-playwright/chromium-1148",
-      ],
-    });
+    const { should_use_web = false } = requestData;
+    let playwrightMcpClient = null;
+    let playwright = null;
 
-    const playwrightMcpClient = new Client({
-      name: "Playwright",
-      version: "1.0.0",
-    });
+    // Only initialize MCP if should_use_web is true
+    if (should_use_web) {
+      playwright = new StdioClientTransport({
+        command: "npx",
+        args: ["-y", "@playwright/mcp@latest"],
+      });
 
-    await playwrightMcpClient.connect(playwright);
+      playwrightMcpClient = new Client({
+        name: "Playwright",
+        version: "1.0.0",
+      });
+
+      await playwrightMcpClient.connect(playwright);
+    }
 
     const prompt = prepareEstimatorPrompt(requestData);
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     console.log(`prompt in gemini service`, prompt);
+
+    // Prepare config with or without tools
+    const config =
+      should_use_web && playwrightMcpClient
+        ? { tools: [mcpToTool(playwrightMcpClient)] }
+        : {};
+
     const result = await ai.models.generateContent({
       model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
       contents: prompt,
-      config: {
-        tools: [mcpToTool(playwrightMcpClient)],
-      },
+      config,
     });
 
-    const responseText = result.candidates[0].content.parts[0].text;
+    // Extract text from response - handle multiple parts when MCP tools are used
+    let responseText = '';
+    if (result.candidates && result.candidates[0] && result.candidates[0].content && result.candidates[0].content.parts) {
+      // Find the part that contains text
+      const textPart = result.candidates[0].content.parts.find(part => part.text);
+      if (textPart) {
+        responseText = textPart.text;
+      } else {
+        // If no text part found, check if there's a direct text in any part
+        for (const part of result.candidates[0].content.parts) {
+          if (typeof part === 'string') {
+            responseText = part;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!responseText) {
+      throw new Error('No text response found in Gemini output');
+    }
 
     const rawGeminiResponse = {
       text: responseText,
@@ -237,6 +281,11 @@ async function generateEstimate(requestData) {
 
     const { projectTitle, currency, instructions } =
       processGeminiResponse(responseText);
+
+    // Clean up MCP client if it was used
+    if (playwrightMcpClient) {
+      await playwrightMcpClient.close();
+    }
 
     return {
       projectTitle,
@@ -257,44 +306,71 @@ async function generateEstimate(requestData) {
  * @param {string} requestData.prompt - The additional prompt to process
  * @param {Object} requestData.existingProject - The existing project data
  * @param {Array} requestData.existingItems - Existing line items for the project
+ * @param {boolean} requestData.should_use_web - Whether to use web browsing tools
  * @returns {Promise<Object>} - Object containing instructions and raw response
  */
 async function generateAdditionalEstimate(requestData) {
   try {
+    const { should_use_web = false } = requestData;
     const prompt = prepareAdditionalEstimatorPrompt(requestData);
 
-    // Set up Playwright client for MCP
-    const playwright = new StdioClientTransport({
-      command: "npx",
-      args: ["-y", "@playwright/mcp@latest"],
-    });
+    let playwrightMcpClient = null;
+    let playwright = null;
 
-    const playwrightMcpClient = new Client({
-      name: "Playwright",
-      version: "1.0.0",
-    });
+    // Only initialize MCP if should_use_web is true
+    if (should_use_web) {
+      // Set up Playwright client for MCP
+      playwright = new StdioClientTransport({
+        command: "npx",
+        args: ["-y", "@playwright/mcp@latest"],
+      });
 
-    await playwrightMcpClient.connect(playwright);
+      playwrightMcpClient = new Client({
+        name: "Playwright",
+        version: "1.0.0",
+      });
 
-    // Initialize Gemini with the Playwright tool
+      await playwrightMcpClient.connect(playwright);
+    }
+
+    // Initialize Gemini
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     console.log(`prompt in gemini service`, prompt);
 
-    // Generate content with tool enabled
+    // Prepare config with or without tools
+    const config =
+      should_use_web && playwrightMcpClient
+        ? { tools: [mcpToTool(playwrightMcpClient)] }
+        : {};
+
+    // Generate content
     const result = await ai.models.generateContent({
       model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
       contents: prompt,
-      config: {
-        tools: [mcpToTool(playwrightMcpClient)],
-      },
+      config,
     });
 
-    console.log(
-      `automatic function calling history amount`,
-      result.automaticFunctionCallingHistory.length
-    );
-    console.log(`result`, result);
-    const responseText = result.candidates[0].content.parts[0].text;
+    // Extract text from response - handle multiple parts when MCP tools are used
+    let responseText = '';
+    if (result.candidates && result.candidates[0] && result.candidates[0].content && result.candidates[0].content.parts) {
+      // Find the part that contains text
+      const textPart = result.candidates[0].content.parts.find(part => part.text);
+      if (textPart) {
+        responseText = textPart.text;
+      } else {
+        // If no text part found, check if there's a direct text in any part
+        for (const part of result.candidates[0].content.parts) {
+          if (typeof part === 'string') {
+            responseText = part;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!responseText) {
+      throw new Error('No text response found in Gemini output');
+    }
 
     // Store the raw response text for debugging/logging
     const rawGeminiResponse = {
@@ -305,7 +381,12 @@ async function generateAdditionalEstimate(requestData) {
 
     // Process and validate the response
     const { instructions } = processGeminiResponse(responseText);
-    playwrightMcpClient.close();
+
+    // Clean up MCP client if it was used
+    if (playwrightMcpClient) {
+      await playwrightMcpClient.close();
+    }
+
     // Return the structured data
     return {
       instructions,

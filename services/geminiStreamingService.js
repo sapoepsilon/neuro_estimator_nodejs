@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, mcpToTool } from "@google/genai";
 import { GEMINI_MODELS, MODEL_CONFIGS } from "../aimodel/geminiModels.js";
 import { jsonrepair } from "jsonrepair";
 import { XMLParser } from "fast-xml-parser";
@@ -7,7 +7,7 @@ export class GeminiStreamingService {
   constructor() {
     const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error('Google API key not found in environment variables');
+      throw new Error("Google API key not found in environment variables");
     }
     this.ai = new GoogleGenAI({ apiKey });
   }
@@ -20,72 +20,76 @@ export class GeminiStreamingService {
    * @param {Object} params.responseStructure - Custom response structure
    * @returns {AsyncGenerator} Stream of events
    */
-  async *generateEstimateStream({ projectDetails, additionalRequirements, responseStructure }) {
+  async *generateEstimateStream({
+    projectDetails,
+    additionalRequirements,
+    responseStructure,
+  }) {
     try {
       // Prepare the prompt
       const prompt = this.prepareStreamingPrompt({
         projectDetails,
         additionalRequirements,
-        responseStructure
+        responseStructure,
       });
 
       // Yield start event
       yield {
-        type: 'ai_start',
-        message: 'AI model initialized, starting generation'
+        type: "ai_start",
+        message: "AI model initialized, starting generation",
       };
 
       // Use generateContentStream for true streaming
       yield {
-        type: 'progress',
-        message: 'Sending request to AI model...',
-        stage: 'request'
+        type: "progress",
+        message: "Sending request to AI model...",
+        stage: "request",
       };
 
       // Use TRUE streaming API with @google/genai
       const response = await this.ai.models.generateContentStream({
         model: GEMINI_MODELS.FLASH_2_0_001,
         contents: prompt,
-        config: MODEL_CONFIGS.ESTIMATOR
+        config: MODEL_CONFIGS.ESTIMATOR,
       });
-      
-      let accumulatedText = '';
+
+      let accumulatedText = "";
       let chunkCount = 0;
-      
+
       // Process the ACTUAL stream from Gemini
       for await (const chunk of response) {
         const chunkText = chunk.text;
         if (!chunkText) continue;
-        
+
         accumulatedText += chunkText;
         chunkCount++;
-        
+
         // Yield each chunk as it arrives
         yield {
-          type: 'chunk',
+          type: "chunk",
           content: chunkText,
           chunkNumber: chunkCount,
-          totalLength: accumulatedText.length
+          totalLength: accumulatedText.length,
         };
-        
+
         // Also yield progress
         yield {
-          type: 'progress',
+          type: "progress",
           message: `Receiving from AI...`,
           chunkCount,
           accumulatedLength: accumulatedText.length,
-          stage: 'streaming',
-          latestChunk: chunkText.substring(0, 100)
+          stage: "streaming",
+          latestChunk: chunkText.substring(0, 100),
         };
-        
+
         // Try to extract partial data if we have enough
         if (accumulatedText.length > 300) {
           try {
             const partialData = this.extractPartialData(accumulatedText);
             if (partialData && Object.keys(partialData).length > 0) {
               yield {
-                type: 'partial',
-                data: partialData
+                type: "partial",
+                data: partialData,
               };
             }
           } catch (e) {
@@ -96,34 +100,36 @@ export class GeminiStreamingService {
 
       // Process complete response
       yield {
-        type: 'ai_complete',
-        message: 'AI generation complete, processing response'
+        type: "ai_complete",
+        message: "AI generation complete, processing response",
       };
 
       // Parse and validate the complete response
-      const processedResponse = await this.processStreamResponse(accumulatedText, {
-        projectDetails,
-        responseStructure
-      });
+      const processedResponse = await this.processStreamResponse(
+        accumulatedText,
+        {
+          projectDetails,
+          responseStructure,
+        }
+      );
 
       // Yield complete event with data
       yield {
-        type: 'complete',
-        data: processedResponse
+        type: "complete",
+        data: processedResponse,
       };
-
     } catch (error) {
-      console.error('Gemini streaming error:', error);
-      
+      console.error("Gemini streaming error:", error);
+
       // Classify and yield error
       const errorType = this.classifyError(error);
       yield {
-        type: 'error',
+        type: "error",
         error: error.message,
         code: errorType,
-        details: error.stack
+        details: error.stack,
       };
-      
+
       throw error;
     }
   }
@@ -131,10 +137,14 @@ export class GeminiStreamingService {
   /**
    * Prepare prompt for streaming context
    */
-  prepareStreamingPrompt({ projectDetails, additionalRequirements, responseStructure }) {
+  prepareStreamingPrompt({
+    projectDetails,
+    additionalRequirements,
+    responseStructure,
+  }) {
     const baseRequest = {
       projectDetails,
-      additionalRequirements
+      additionalRequirements,
     };
 
     // If custom response structure provided, use it
@@ -154,8 +164,12 @@ Ensure all numeric values are actual numbers, not strings.`;
     }
 
     // Otherwise use default XML format prompt
-    const prompt = `${projectDetails.title}\n\n${projectDetails.description}\n\nScope: ${projectDetails.scope || ''}\nTimeline: ${projectDetails.timeline || ''}`;
-    
+    const prompt = `${projectDetails.title}\n\n${
+      projectDetails.description
+    }\n\nScope: ${projectDetails.scope || ""}\nTimeline: ${
+      projectDetails.timeline || ""
+    }`;
+
     return `
     You are a professional construction estimator. Based on the following construction project description, create a detailed line item estimate with proper construction trades and categories.
     
@@ -196,12 +210,12 @@ Ensure all numeric values are actual numbers, not strings.`;
           return {
             ...parsed,
             projectTitle: context.projectDetails.title,
-            currency: 'USD',
+            currency: "USD",
             streamingMode: true,
             rawResponse: {
               prompt: JSON.stringify(context.projectDetails),
-              response: responseText
-            }
+              response: responseText,
+            },
           };
         } catch (jsonError) {
           // Try JSON repair
@@ -210,13 +224,13 @@ Ensure all numeric values are actual numbers, not strings.`;
           return {
             ...parsed,
             projectTitle: context.projectDetails.title,
-            currency: 'USD',
+            currency: "USD",
             streamingMode: true,
             wasRepaired: true,
             rawResponse: {
               prompt: JSON.stringify(context.projectDetails),
-              response: responseText
-            }
+              response: responseText,
+            },
           };
         }
       }
@@ -228,31 +242,31 @@ Ensure all numeric values are actual numbers, not strings.`;
       return {
         ...result,
         projectTitle: result.projectTitle || context.projectDetails.title,
-        currency: result.currency || 'USD',
+        currency: result.currency || "USD",
         streamingMode: true,
         rawResponse: {
           prompt: JSON.stringify(context.projectDetails),
-          response: responseText
-        }
+          response: responseText,
+        },
       };
     } catch (error) {
-      console.error('Error processing stream response:', error);
-      
+      console.error("Error processing stream response:", error);
+
       // Try JSON repair as last fallback
       try {
         const repaired = jsonrepair(responseText);
         const parsed = JSON.parse(repaired);
-        
+
         return {
           ...parsed,
           projectTitle: context.projectDetails.title,
-          currency: 'USD',
+          currency: "USD",
           streamingMode: true,
           wasRepaired: true,
           rawResponse: {
             prompt: JSON.stringify(context.projectDetails),
-            response: responseText
-          }
+            response: responseText,
+          },
         };
       } catch (repairError) {
         throw new Error(`Failed to process AI response: ${error.message}`);
@@ -334,20 +348,22 @@ Ensure all numeric values are actual numbers, not strings.`;
         title: /title["\s:]+([^",\n]+)/i,
         totalAmount: /totalAmount["\s:]+(\d+)/i,
         currency: /currency["\s:]+([A-Z]{3})/i,
-        lineItemCount: /lineItems["\s:]+\[/i
+        lineItemCount: /lineItems["\s:]+\[/i,
       };
 
       const partialData = {};
-      
+
       for (const [key, pattern] of Object.entries(patterns)) {
         const match = text.match(pattern);
         if (match) {
-          if (key === 'totalAmount') {
+          if (key === "totalAmount") {
             partialData[key] = parseInt(match[1]);
-          } else if (key === 'lineItemCount') {
+          } else if (key === "lineItemCount") {
             // Count line items if array started
             const lineItemMatches = text.match(/\{[^}]*description[^}]*\}/g);
-            partialData.lineItemCount = lineItemMatches ? lineItemMatches.length : 0;
+            partialData.lineItemCount = lineItemMatches
+              ? lineItemMatches.length
+              : 0;
           } else {
             partialData[key] = match[1].trim();
           }
@@ -365,32 +381,39 @@ Ensure all numeric values are actual numbers, not strings.`;
    */
   classifyError(error) {
     const message = error.message.toLowerCase();
-    
-    if (message.includes('quota') || message.includes('rate limit')) {
-      return 'QUOTA_ERROR';
-    } else if (message.includes('timeout')) {
-      return 'TIMEOUT_ERROR';
-    } else if (message.includes('auth') || message.includes('api key')) {
-      return 'AUTH_ERROR';
-    } else if (message.includes('invalid')) {
-      return 'VALIDATION_ERROR';
+
+    if (message.includes("quota") || message.includes("rate limit")) {
+      return "QUOTA_ERROR";
+    } else if (message.includes("timeout")) {
+      return "TIMEOUT_ERROR";
+    } else if (message.includes("auth") || message.includes("api key")) {
+      return "AUTH_ERROR";
+    } else if (message.includes("invalid")) {
+      return "VALIDATION_ERROR";
     }
-    
-    return 'UNKNOWN_ERROR';
+
+    return "UNKNOWN_ERROR";
   }
 
   /**
    * Generate additional estimate stream for existing projects
    * @param {Object} params - Generation parameters
+   * @param {boolean} params.should_use_web - Whether to use web browsing tools
    * @returns {AsyncGenerator} Stream of events
    */
-  async *generateAdditionalEstimateStream({ prompt, existingProject, existingItems = [], userId }) {
+  async *generateAdditionalEstimateStream({
+    prompt,
+    existingProject,
+    existingItems = [],
+    userId,
+    should_use_web = false,
+  }) {
     try {
       // Yield start event
       yield {
-        type: 'progress',
-        message: 'Preparing context for AI...',
-        stage: 'preparation'
+        type: "progress",
+        message: "Preparing context for AI...",
+        stage: "preparation",
       };
 
       // Format existing items for context
@@ -406,14 +429,22 @@ Ensure all numeric values are actual numbers, not strings.`;
         .join("\n");
 
       const additionalPrompt = `
-        You are an estimator agent. You have access to a web browser tool to test the prices if the user requests it. You have previously created an estimate for a project titled "${
-          existingProject.name || "Untitled Project"
-        }". 
+        You are an estimator agent. ${
+          should_use_web
+            ? "You have access to a web browser tool to test the prices if the user requests it."
+            : ""
+        } You have previously created an estimate for a project titled "${
+        existingProject.name || "Untitled Project"
+      }". 
         Now you need to modify the estimate based on the following additional request.
         
         Current line items (showing first 300):
         ${formattedItems || "No existing items"}
-        ${existingItems.length > 300 ? `\n... and ${existingItems.length - 300} more items` : ''}
+        ${
+          existingItems.length > 300
+            ? `\n... and ${existingItems.length - 300} more items`
+            : ""
+        }
         
         Additional request from the user:
         ${prompt}
@@ -430,51 +461,70 @@ Ensure all numeric values are actual numbers, not strings.`;
         Each <action> tag must contain one of the following:
         1. For adding new items: Start with '+' followed by attributes (description, quantity, unit_price, amount)
         2. For updating existing items: Start with '+' followed by the item ID and the attributes to update
-        3. For deleting items: Start with '-' followed by the item ID
+        3. For deleting items: Start with '-' followed by the item ID${
+          should_use_web
+            ? `
         4. We now support tools to browse internet. If you notice that there is a link we should use the playwright tool to browse the internet
-           a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter
+           a. If the user asks you to search somewhere on the internet, use the playwright tool to browse the internet, and hit enter to search if there is no search button, but do not type in enter`
+            : ""
+        }
         
         Do not include any other text, explanations, or formatting outside of this XML structure.
       `;
 
       yield {
-        type: 'progress',
-        message: 'Sending request to AI model...',
-        stage: 'request',
-        contextSize: existingItems.length
+        type: "progress",
+        message: "Sending request to AI model...",
+        stage: "request",
+        contextSize: existingItems.length,
       };
 
       // Set up MCP tools if needed
-      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-      const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-      const { GoogleGenAI, mcpToTool } = await import("@google/genai");
-      
-      // Initialize Playwright MCP client
-      const playwright = new StdioClientTransport({
-        command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--no-sandbox"],
-      });
+      let playwrightMcpClient = null;
+      let playwright = null;
 
-      const playwrightMcpClient = new Client({
-        name: "Playwright",
-        version: "1.0.0",
-      });
+      if (should_use_web) {
+        const { Client } = await import(
+          "@modelcontextprotocol/sdk/client/index.js"
+        );
+        const { StdioClientTransport } = await import(
+          "@modelcontextprotocol/sdk/client/stdio.js"
+        );
 
-      await playwrightMcpClient.connect(playwright);
+        // Initialize Playwright MCP client
+        playwright = new StdioClientTransport({
+          command: "npx",
+          args: ["-y", "@playwright/mcp@latest"],
+        });
 
-      // Initialize Gemini with MCP tools
+        playwrightMcpClient = new Client({
+          name: "Playwright",
+          version: "1.0.0",
+        });
+
+        await playwrightMcpClient.connect(playwright);
+      }
+
+      // Initialize Gemini
+      const { GoogleGenAI } = await import("@google/genai");
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
+
+      // Prepare config with or without tools
+      const config =
+        should_use_web && playwrightMcpClient
+          ? {
+              tools: [mcpToTool(playwrightMcpClient)],
+            }
+          : {};
+
       // Generate content stream
       const response = await ai.models.generateContentStream({
         model: GEMINI_MODELS.FLASH_2_5_04_17_PREVIEW,
         contents: additionalPrompt,
-        config: {
-          tools: [mcpToTool(playwrightMcpClient)],
-        },
+        config,
       });
 
-      let accumulatedText = '';
+      let accumulatedText = "";
       let chunkCount = 0;
       let mcpCallCount = 0;
 
@@ -482,7 +532,7 @@ Ensure all numeric values are actual numbers, not strings.`;
       for await (const chunk of response) {
         const chunkText = chunk.text;
         if (!chunkText) continue;
-        
+
         accumulatedText += chunkText;
         chunkCount++;
 
@@ -490,68 +540,69 @@ Ensure all numeric values are actual numbers, not strings.`;
         if (chunk.functionCalls) {
           mcpCallCount++;
           yield {
-            type: 'mcp_action',
-            tool: 'playwright',
+            type: "mcp_action",
+            tool: "playwright",
             callNumber: mcpCallCount,
-            message: 'AI is browsing the web...'
+            message: "AI is browsing the web...",
           };
         }
-        
+
         // Yield chunk event
         yield {
-          type: 'chunk',
+          type: "chunk",
           content: chunkText,
           chunkNumber: chunkCount,
-          totalLength: accumulatedText.length
+          totalLength: accumulatedText.length,
         };
-        
+
         // Yield progress
         yield {
-          type: 'progress',
+          type: "progress",
           message: `Receiving AI response...`,
           chunkCount,
           accumulatedLength: accumulatedText.length,
-          stage: 'streaming'
+          stage: "streaming",
         };
       }
 
       // Process complete response
       yield {
-        type: 'ai_complete',
-        message: 'AI generation complete, processing response'
+        type: "ai_complete",
+        message: "AI generation complete, processing response",
       };
 
       // Parse XML response
       const processedResponse = this.processXMLResponse(accumulatedText);
-      
-      // Clean up MCP client
-      await playwrightMcpClient.close();
+
+      // Clean up MCP client if it was used
+      if (playwrightMcpClient) {
+        await playwrightMcpClient.close();
+      }
 
       // Yield complete event with instructions
       yield {
-        type: 'complete',
+        type: "complete",
         data: {
           instructions: processedResponse.instructions || [],
           rawResponse: {
             text: accumulatedText,
             timestamp: new Date().toISOString(),
-            prompt: additionalPrompt
-          }
-        }
+            prompt: additionalPrompt,
+          },
+        },
       };
-
     } catch (error) {
-      console.error('Additional estimate streaming error:', error);
-      
+      console.error("Additional estimate streaming error:", error);
+
       // Classify and yield error
       const errorType = this.classifyError(error);
       yield {
-        type: 'error',
+        type: "error",
         error: error.message,
         code: errorType,
-        details: error.stack
+        details: error.stack,
       };
-      
+
       throw error;
     }
   }

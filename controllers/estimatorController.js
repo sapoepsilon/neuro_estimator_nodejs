@@ -68,6 +68,7 @@ async function handleEstimatorRequest(req, res) {
         description: prompt
       },
       userId: user.id,
+      should_use_web: requestData.should_use_web || false,
     };
 
     // Generate construction estimate using AI
@@ -185,6 +186,7 @@ async function handleAdditionalPrompt(req, res) {
           projectId: project.id,
           existingProject: project,
           existingItems: lineItems,
+          should_use_web: requestData.should_use_web || false,
         });
 
       const actionSummary = await applyLineItemChanges(
@@ -899,7 +901,8 @@ async function handleAdditionalPromptStream(req, res) {
       prompt: requestData.prompt,
       existingProject: project,
       existingItems: lineItems,
-      userId: user.id
+      userId: user.id,
+      should_use_web: requestData.should_use_web || false
     })) {
       // Forward AI events to client
       res.stream.write(event);
