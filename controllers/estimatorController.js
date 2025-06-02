@@ -177,7 +177,7 @@ async function handleAdditionalPrompt(req, res) {
     }
 
     if (project.business_id) {
-      const lineItems = await getProjectLineItems(projectId, offset, 300);
+      const lineItems = await getProjectLineItems(projectId);
       const { instructions, rawGeminiResponse } =
         await generateAdditionalEstimate({
           ...requestData,
@@ -202,9 +202,6 @@ async function handleAdditionalPrompt(req, res) {
         actionSummary
       );
 
-      const hasMoreItems = lineItems.length === 300;
-      const nextOffset = hasMoreItems ? offset + lineItems.length : null;
-
       return res.json({
         success: true,
         projectId,
@@ -212,7 +209,6 @@ async function handleAdditionalPrompt(req, res) {
         itemsUpdated: actionSummary.itemsUpdated,
         itemsDeleted: actionSummary.itemsDeleted,
         errors: actionSummary.errors,
-        nextOffset,
         message: `Applied ${
           actionSummary.itemsAdded +
           actionSummary.itemsUpdated +

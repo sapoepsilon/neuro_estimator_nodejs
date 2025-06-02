@@ -5,8 +5,7 @@ import { streamEstimate, streamEstimateProgress } from '../controllers/aiStreami
 const router = express.Router();
 
 // Stream estimate generation
-// TODO: Re-enable auth after testing
-router.post('/api/agent/stream', streamEstimate);
+router.post('/api/agent/stream', verifyAuth, streamEstimate);
 
 // Stream progress for line item changes
 router.post('/api/agent/stream/progress', verifyAuth, streamEstimateProgress);

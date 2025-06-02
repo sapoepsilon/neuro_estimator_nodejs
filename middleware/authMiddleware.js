@@ -10,6 +10,20 @@ const verifyAuth = async (req, res, next) => {
   try {
     // Get the authorization header
     const authHeader = req.headers.authorization;
+    
+    // Localhost bypass - only if no JWT token is provided
+    if ((!authHeader || !authHeader.startsWith("Bearer ")) && 
+        (req.hostname === 'localhost' || req.hostname === '127.0.0.1' || req.ip === '127.0.0.1' || req.ip === '::1')) {
+      console.log('Localhost bypass: using g1@viusbuilt.com for development');
+      req.user = {
+        id: '91116c54-4896-4d59-bae3-610e16592d2d',
+        email: 'g1@viusbuilt.com',
+        aud: 'authenticated',
+        role: 'authenticated'
+      };
+      return next();
+    }
+    
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       console.error("No authorization header found");
       return res.status(401).json({
